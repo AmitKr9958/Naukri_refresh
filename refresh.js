@@ -147,7 +147,15 @@ async function launchBrowserContext() {
     return await chromium.launchPersistentContext(profileDir, {
       headless: HEADLESS,
       viewport: { width: 1440, height: 900 },
-      args: ["--disable-blink-features=AutomationControlled"]
+      // Naukri currently requires headed Chromium. Keep the real browser engine
+      // active, but start its window off-screen so no Chromium window is visible
+      // during normal background operation. File uploads are handled by
+      // Playwright's filechooser API, so no native file-picker window is needed.
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--start-minimized",
+        "--window-position=-32000,-32000"
+      ]
     });
   } catch (error) {
     const message = String(error && error.message || error);
