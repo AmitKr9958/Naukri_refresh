@@ -1,1 +1,16 @@
-{"name":"naukri-refresh","version":"1.0.0","private":true,"description":"Local Playwright automation for periodically updating a Naukri profile/resume.","scripts":{"install-browser":"playwright install chromium","login":"node login-once.js","start":"node refresh.js"},"dependencies":{"dotenv":"^16.4.7","playwright":"^1.55.0"}}
+{
+  "name": "naukri-refresh",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Playwright automation for periodically updating a Naukri profile/resume.",
+  "scripts": {
+    "install-browser": "playwright install chromium",
+    "login": "node login-once.js",
+    "start": "node refresh.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "playwright": "^1.55.0",
+    "nodemailer": "^7.0.6"
+  }
+}
