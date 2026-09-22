@@ -1,0 +1,7 @@
+node_modules/
+.env
+naukri-browser-profile/
+logs/
+*.log
+resume/*.pdf
+.DS_Store
