@@ -17,7 +17,8 @@ fs.mkdirSync(logDir, { recursive: true });
 function log(message) {
   const line = "[" + new Date().toISOString() + "] " + message;
   console.log(line);
-  fs.appendFileSync(path.join(logDir, "naukri-refresh.log"), line + "\n");
+  fs.appendFileSync(path.join(logDir, "naukri-refresh.log"), line + "
+");
 }
 
 async function dismissPopups(page) {
@@ -118,61 +119,89 @@ async function uploadResume(page) {
   throw new Error("Could not find Naukri resume upload control/input. The Naukri UI may have changed.");
 }
 
+async function launchBrowserContext() {
+  try {
+    return await chromium.launchPersistentContext(profileDir, {
+      headless: HEADLESS,
+      viewport: { width: 1440, height: 900 },
+      args: ["--disable-blink-features=AutomationControlled"]
+    });
+  } catch (error) {
+    const message = String(error && error.message || error);
+
+    if (/existing browser session|profile is already in use|user-data-dir/i.test(message)) {
+      throw new Error(
+        "The saved Naukri Chromium profile is already open in another browser/process. " +
+        "Close every browser window using this automation session (especially the Naukri automation window), " +
+        "then run npm start again. Your saved login/session is not being deleted."
+      );
+    }
+
+    throw error;
+  }
+}
+
 (async () => {
   if (!fs.existsSync(profileDir)) {
     throw new Error("No saved Naukri session. Run: npm run login");
   }
 
-  const context = await chromium.launchPersistentContext(profileDir, {
-    headless: HEADLESS,
-    viewport: { width: 1440, height: 900 },
-    args: ["--disable-blink-features=AutomationControlled"]
-  });
+  let context;
 
-  let cycle = 0;
-  let failures = 0;
+  try {
+    context = await launchBrowserContext();
 
-  process.on("SIGINT", async () => {
-    log("Stopping...");
-    await context.close();
-    process.exit(0);
-  });
+    let cycle = 0;
+    let failures = 0;
 
-  while (true) {
-    cycle++;
+    const stop = async () => {
+      log("Stopping...");
+      if (context) await context.close().catch(() => {});
+      process.exit(0);
+    };
 
-    try {
-      const page = context.pages()[0] || await context.newPage();
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
 
-      log("Cycle " + cycle + ": opening profile");
-      await openProfile(page);
+    while (true) {
+      cycle++;
 
-      const profileUpdateAttempted = await tryNormalProfileUpdate(page);
-      log(
-        "Cycle " + cycle + ": profile update " +
-        (profileUpdateAttempted ? "attempted" : "not available")
-      );
+      try {
+        const page = context.pages()[0] || await context.newPage();
 
-      log("Cycle " + cycle + ": uploading resume");
-      await uploadResume(page);
-      await page.waitForTimeout(2000);
-      log("Cycle " + cycle + ": resume upload action completed");
+        log("Cycle " + cycle + ": opening profile");
+        await openProfile(page);
 
-      failures = 0;
-    } catch (error) {
-      failures++;
-      log("Cycle " + cycle + " failed: " + error.message);
+        const profileUpdateAttempted = await tryNormalProfileUpdate(page);
+        log(
+          "Cycle " + cycle + ": profile update " +
+          (profileUpdateAttempted ? "attempted" : "not available")
+        );
 
-      if (failures >= MAX_FAILURES) {
-        log("Stopping after " + failures + " consecutive failures.");
-        await context.close();
-        process.exit(1);
+        log("Cycle " + cycle + ": uploading resume");
+        await uploadResume(page);
+        await page.waitForTimeout(2000);
+        log("Cycle " + cycle + ": resume upload action completed");
+
+        failures = 0;
+      } catch (error) {
+        failures++;
+        log("Cycle " + cycle + " failed: " + error.message);
+
+        if (failures >= MAX_FAILURES) {
+          log("Stopping after " + failures + " consecutive failures.");
+          await context.close().catch(() => {});
+          process.exit(1);
+        }
       }
-    }
 
-    log("Cycle " + cycle + ": waiting " + INTERVAL_MINUTES + " minutes");
-    await new Promise(resolve =>
-      setTimeout(resolve, INTERVAL_MINUTES * 60 * 1000)
-    );
+      log("Cycle " + cycle + ": waiting " + INTERVAL_MINUTES + " minutes");
+      await new Promise(resolve =>
+        setTimeout(resolve, INTERVAL_MINUTES * 60 * 1000)
+      );
+    }
+  } catch (error) {
+    log("Startup failed: " + error.message);
+    process.exit(1);
   }
 })();
