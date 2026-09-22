@@ -1,4 +1,5 @@
 const { chromium } = require("playwright");
+const nodemailer = require("nodemailer");
 const fs = require("fs");
 const path = require("path");
 require("dotenv").config();
@@ -9,6 +10,61 @@ const INTERVAL_MINUTES = Math.max(1, Number(process.env.REFRESH_INTERVAL_MINUTES
 const MAX_FAILURES = Math.max(1, Number(process.env.MAX_CONSECUTIVE_FAILURES || 3));
 const HEADLESS = String(process.env.HEADLESS || "false").toLowerCase() === "true";
 const DEBUG_PROFILE_UI = String(process.env.DEBUG_PROFILE_UI || "true").toLowerCase() === "true";
+const ALERT_EMAIL = String(process.env.ALERT_EMAIL || "").trim();
+const SMTP_HOST = String(process.env.SMTP_HOST || "").trim();
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").toLowerCase() === "true";
+const SMTP_USER = String(process.env.SMTP_USER || "").trim();
+const SMTP_PASS = String(process.env.SMTP_PASS || "");
+const ALERT_COOLDOWN_MINUTES = Math.max(1, Number(process.env.ALERT_COOLDOWN_MINUTES || 60));
+let lastAlertAt = 0;
+
+const emailAlertsEnabled =
+  Boolean(ALERT_EMAIL && SMTP_HOST && SMTP_USER && SMTP_PASS);
+
+const mailer = emailAlertsEnabled
+  ? nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_SECURE,
+      auth: { user: SMTP_USER, pass: SMTP_PASS }
+    })
+  : null;
+
+async function sendFailureAlert(subject, errorMessage) {
+  if (!mailer) {
+    log("Email alerts are not configured; skipping failure email.");
+    return;
+  }
+
+  const now = Date.now();
+  if (now - lastAlertAt < ALERT_COOLDOWN_MINUTES * 60 * 1000) {
+    log("Failure email suppressed by alert cooldown.");
+    return;
+  }
+
+  lastAlertAt = now;
+
+  const logTail = fs.readFileSync(
+    path.join(logDir, "naukri-refresh.log"),
+    "utf8"
+  ).split(/\r?\n/).slice(-25).join("\n");
+
+  try {
+    await mailer.sendMail({
+      from: SMTP_USER,
+      to: ALERT_EMAIL,
+      subject,
+      text:
+        "Naukri Refresh automation failure.\n\n" +
+        "Error:\n" + errorMessage + "\n\n" +
+        "Recent log:\n" + logTail
+    });
+    log("Failure alert email sent to " + ALERT_EMAIL);
+  } catch (mailError) {
+    log("Could not send failure alert email: " + mailError.message);
+  }
+}
 const profileDir = path.resolve("naukri-browser-profile");
 const logDir = path.resolve("logs");
 
@@ -222,9 +278,17 @@ async function launchBrowserContext() {
       } catch (error) {
         failures++;
         log("Cycle " + cycle + " failed: " + error.message);
+        await sendFailureAlert(
+          "Naukri Refresh - cycle " + cycle + " failed",
+          error.message
+        );
 
         if (failures >= MAX_FAILURES) {
           log("Stopping after " + failures + " consecutive failures.");
+          await sendFailureAlert(
+            "Naukri Refresh - automation stopped",
+            failures + " consecutive failures. Last error: " + error.message
+          );
           await context.close().catch(() => {});
           process.exit(1);
         }
@@ -237,6 +301,10 @@ async function launchBrowserContext() {
     }
   } catch (error) {
     log("Startup failed: " + error.message);
+    await sendFailureAlert(
+      "Naukri Refresh - startup failure",
+      error.message
+    );
     process.exit(1);
   }
 })();
