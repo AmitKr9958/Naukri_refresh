@@ -14,7 +14,7 @@ The recommended working configuration is HEADLESS=false. The current Naukri UI/s
 
 The repository includes run-background.ps1, install-background.ps1, and uninstall-background.ps1.
 
-The background task hides the PowerShell terminal, but intentionally does not force Chromium into headless mode because the current Naukri UI works with the verified headed session.
+The background task hides the PowerShell terminal and hides the automation Chromium window from the Windows desktop/taskbar. Chromium remains headed internally because the current Naukri UI works with the verified headed session.
 
 Install once:
 
@@ -35,8 +35,8 @@ Uninstall:
 ### Important
 
 - The PowerShell/terminal window is hidden.
-- Chromium is headed and may be visible because this is the verified working mode.
-- This is not intended to hide automation from Naukri or bypass anti-bot controls.
+- Chromium is headed internally for compatibility, but the background launcher hides the automation window from the desktop/taskbar.
+- The window-hiding is local desktop behavior only; it is not intended to hide automation from Naukri or bypass anti-bot controls.
 - Keep the Windows user session available for the browser UI.
 - The task cannot run while the laptop is powered off.
 - If Naukri presents CAPTCHA, OTP, verification, or a restriction, stop and complete the required human verification manually.
