@@ -1,12 +1,12 @@
 # Naukri Refresh
 
-Local Playwright automation for a persistent Naukri browser session and configurable resume refresh.
+Local Playwright automation for a persistent Naukri browser session and configurable profile/resume refresh.
 
 ## Safety and account protection
 
-This tool is intended for personal use. Naukri can change its UI, require CAPTCHA/OTP, or apply anti-automation controls. Review Naukri's current Terms of Service before use. A 10-minute interval is intentionally configurable; if Naukri presents a warning, CAPTCHA, verification, or restriction, stop the tool rather than attempting to bypass it.
+This tool is intended for personal use. Naukri can change its UI, require CAPTCHA/OTP, or apply anti-automation controls. Review Naukri's current Terms of Service before use. If Naukri presents a warning, CAPTCHA, verification, or restriction, stop the tool rather than attempting to bypass it.
 
-Your password, browser session, logs, and resume PDF are kept off GitHub by .gitignore.
+Your password, browser session, logs, and resume are kept off GitHub by .gitignore.
 
 ## Windows setup
 
@@ -23,11 +23,7 @@ Create your local configuration:
 
     Copy-Item .env.example .env
 
-Edit .env:
-
-    RESUME_PATH=C:\Users\YOUR_NAME\Documents\Resume.pdf
-    REFRESH_INTERVAL_MINUTES=10
-    HEADLESS=false
+Edit .env with your own resume path and desired interval.
 
 ## First login
 
@@ -41,21 +37,49 @@ The persistent browser session is saved locally in:
 
     naukri-browser-profile/
 
-## Start the refresh loop
+## Normal foreground mode
 
 Run:
 
     npm start
 
-The process attempts the configured resume upload, writes a timestamped result to logs/naukri-refresh.log, waits the configured number of minutes, and repeats.
+This uses the HEADLESS value from .env.
 
-Stop with Ctrl+C.
+## Windows background mode
+
+The repository includes:
+
+    run-background.ps1
+    install-background.ps1
+    uninstall-background.ps1
+
+The background runner forces Playwright into headless mode, so no browser window is intended to appear.
+
+After the first manual login, install the Windows Task Scheduler task once:
+
+    powershell -ExecutionPolicy Bypass -File .\install-background.ps1
+
+Then start it immediately:
+
+    Start-ScheduledTask -TaskName "Naukri Refresh Background"
+
+The task is configured to start when your Windows user logs in and to restart if the process exits unexpectedly.
+
+Check its status:
+
+    Get-ScheduledTask -TaskName "Naukri Refresh Background" | Get-ScheduledTaskInfo
+
+Stop/uninstall the task:
+
+    powershell -ExecutionPolicy Bypass -File .\uninstall-background.ps1
+
+Important: Windows Task Scheduler runs only while the laptop is powered on and the Windows user session is available. It does not run while the laptop is shut down.
 
 ## If Naukri changes its UI
 
-Run with HEADLESS=false and inspect the page. The upload logic is in refresh.js and uses a file input first, followed by common resume controls.
+For troubleshooting, temporarily use HEADLESS=false and inspect the page. The automation uses normal visible profile/update controls and the resume file input.
 
-Do not try to bypass CAPTCHA or account verification. If the UI requires human verification, complete it manually.
+Do not bypass CAPTCHA or account verification. If the UI requires human verification, complete it manually.
 
 ## Security
 
