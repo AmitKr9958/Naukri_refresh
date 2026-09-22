@@ -51,10 +51,33 @@ async function tryNormalProfileUpdate(page) {
 
   for (const control of selectors) {
     if (await control.isVisible({ timeout: 1000 }).catch(() => false)) {
-      log("Profile update control found; clicking it.");
+      log("Profile/resume update control found; clicking it.");
+
+      // Naukri's current Resume > Update control opens a native file chooser.
+      // Handle that chooser through Playwright so Windows does not show the
+      // file-picker window. Playwright recommends waiting for the filechooser
+      // event before clicking the upload control.
+      const fileChooserPromise = page
+        .waitForEvent("filechooser", { timeout: 3000 })
+        .catch(() => null);
+
       await control.click({ timeout: 5000 }).catch(() => {});
-      await page.waitForTimeout(2000);
-      return true;
+
+      const fileChooser = await fileChooserPromise;
+
+      if (fileChooser) {
+        if (!RESUME_PATH || !fs.existsSync(RESUME_PATH)) {
+          throw new Error("RESUME_PATH does not exist: " + RESUME_PATH);
+        }
+
+        await fileChooser.setFiles(RESUME_PATH);
+        await page.waitForTimeout(2000);
+        log("Native file chooser handled automatically; resume file supplied.");
+        return { attempted: true, resumeUploaded: true };
+      }
+
+      await page.waitForTimeout(1000);
+      return { attempted: true, resumeUploaded: false };
     }
   }
 
@@ -80,7 +103,7 @@ async function tryNormalProfileUpdate(page) {
     }).catch(() => {});
   }
 
-  return false;
+  return { attempted: false, resumeUploaded: false };
 }
 
 async function uploadResume(page) {
@@ -172,16 +195,20 @@ async function launchBrowserContext() {
         log("Cycle " + cycle + ": opening profile");
         await openProfile(page);
 
-        const profileUpdateAttempted = await tryNormalProfileUpdate(page);
+        const profileUpdateResult = await tryNormalProfileUpdate(page);
         log(
           "Cycle " + cycle + ": profile update " +
-          (profileUpdateAttempted ? "attempted" : "not available")
+          (profileUpdateResult.attempted ? "attempted" : "not available")
         );
 
-        log("Cycle " + cycle + ": uploading resume");
-        await uploadResume(page);
-        await page.waitForTimeout(2000);
-        log("Cycle " + cycle + ": resume upload action completed");
+        if (profileUpdateResult.resumeUploaded) {
+          log("Cycle " + cycle + ": resume upload action completed");
+        } else {
+          log("Cycle " + cycle + ": uploading resume");
+          await uploadResume(page);
+          await page.waitForTimeout(2000);
+          log("Cycle " + cycle + ": resume upload action completed");
+        }
 
         failures = 0;
       } catch (error) {
