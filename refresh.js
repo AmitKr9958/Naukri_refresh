@@ -17,8 +17,7 @@ fs.mkdirSync(logDir, { recursive: true });
 function log(message) {
   const line = "[" + new Date().toISOString() + "] " + message;
   console.log(line);
-  fs.appendFileSync(path.join(logDir, "naukri-refresh.log"), line + "
-");
+  fs.appendFileSync(path.join(logDir, "naukri-refresh.log"), line + "\n");
 }
 
 async function dismissPopups(page) {
@@ -60,6 +59,7 @@ async function tryNormalProfileUpdate(page) {
   }
 
   log("No visible profile update control found on the current Naukri profile page.");
+
   if (DEBUG_PROFILE_UI) {
     const labels = await page.locator("button, a").evaluateAll(elements =>
       elements
