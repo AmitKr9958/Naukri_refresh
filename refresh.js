@@ -38,24 +38,27 @@ async function openProfile(page) {
 }
 
 async function tryNormalProfileUpdate(page) {
-  // Only use a normal, visible control if Naukri exposes one.
-  // We do not bypass CAPTCHA/OTP/verification or simulate hidden activity.
+  // Only use a normal, visible Naukri control. No CAPTCHA/OTP bypass,
+  // hidden activity simulation, or other access-control circumvention.
   const selectors = [
     page.getByRole("button", { name: /^Update Profile$/i }).first(),
     page.getByRole("link", { name: /^Update Profile$/i }).first(),
+    page.getByRole("button", { name: /^Update$/i }).first(),
+    page.getByRole("link", { name: /^Update$/i }).first(),
+    page.getByText(/^Update$/i).first(),
     page.getByText(/^Update Profile$/i).first()
   ];
 
   for (const control of selectors) {
     if (await control.isVisible({ timeout: 1000 }).catch(() => false)) {
       log("Profile update control found; clicking it.");
-      await control.click({ timeout: 5000 });
+      await control.click({ timeout: 5000 }).catch(() => {});
       await page.waitForTimeout(2000);
       return true;
     }
   }
 
-  log("No visible 'Update Profile' control found on the current Naukri profile page.");
+  log("No visible profile update control found on the current Naukri profile page.");
   if (DEBUG_PROFILE_UI) {
     const labels = await page.locator("button, a").evaluateAll(elements =>
       elements
@@ -63,16 +66,19 @@ async function tryNormalProfileUpdate(page) {
         .filter(text => text && /profile|update|edit|resume/i.test(text))
         .slice(0, 30)
     ).catch(() => []);
+
     if (labels.length) {
       log("Relevant visible UI labels: " + labels.join(" | "));
     } else {
       log("No relevant profile/update/edit/resume button or link labels detected.");
     }
+
     await page.screenshot({
       path: path.join(logDir, "profile-ui-cycle-" + Date.now() + ".png"),
       fullPage: true
     }).catch(() => {});
   }
+
   return false;
 }
 
