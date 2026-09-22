@@ -8,6 +8,7 @@ const RESUME_PATH = path.resolve(process.env.RESUME_PATH || "");
 const INTERVAL_MINUTES = Math.max(1, Number(process.env.REFRESH_INTERVAL_MINUTES || 20));
 const MAX_FAILURES = Math.max(1, Number(process.env.MAX_CONSECUTIVE_FAILURES || 3));
 const HEADLESS = String(process.env.HEADLESS || "false").toLowerCase() === "true";
+const DEBUG_PROFILE_UI = String(process.env.DEBUG_PROFILE_UI || "true").toLowerCase() === "true";
 const profileDir = path.resolve("naukri-browser-profile");
 const logDir = path.resolve("logs");
 
@@ -55,6 +56,23 @@ async function tryNormalProfileUpdate(page) {
   }
 
   log("No visible 'Update Profile' control found on the current Naukri profile page.");
+  if (DEBUG_PROFILE_UI) {
+    const labels = await page.locator("button, a").evaluateAll(elements =>
+      elements
+        .map(el => (el.innerText || el.getAttribute("aria-label") || "").trim())
+        .filter(text => text && /profile|update|edit|resume/i.test(text))
+        .slice(0, 30)
+    ).catch(() => []);
+    if (labels.length) {
+      log("Relevant visible UI labels: " + labels.join(" | "));
+    } else {
+      log("No relevant profile/update/edit/resume button or link labels detected.");
+    }
+    await page.screenshot({
+      path: path.join(logDir, "profile-ui-cycle-" + Date.now() + ".png"),
+      fullPage: true
+    }).catch(() => {});
+  }
   return false;
 }
 
