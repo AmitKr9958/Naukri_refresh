@@ -72,6 +72,34 @@ try {
             }
             Hide-NaukriBrowserWindows
             $exitCode = $nodeProcess.ExitCode
+
+            # refresh.js can exit while headed Chromium survives as an orphan.
+            # Because the persistent profile can only be opened by one Chromium
+            # process tree, clean up only browser processes belonging to this
+            # automation profile before restarting. This runs only after the
+            # Node process has already exited, so it cannot interrupt a healthy
+            # refresh cycle or any normal Chrome session.
+            try {
+                $staleBrowsers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.CommandLine -and
+                        $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                        $_.Name -match "^(chrome|msedge|chromium)(\.exe)?$"
+                    }
+
+                foreach ($browser in $staleBrowsers) {
+                    try {
+                        Stop-Process -Id ([int]$browser.ProcessId) -Force -ErrorAction SilentlyContinue
+                    } catch {}
+                }
+
+                if ($staleBrowsers) {
+                    Write-Host "Cleaned up $($staleBrowsers.Count) orphan automation browser process(es) before restart."
+                }
+            } catch {
+                Write-Host "Could not clean up orphan automation browser processes: $($_.Exception.Message)"
+            }
+
             Write-Host "Naukri Refresh exited with code $exitCode. Restarting in 60 seconds."
             Start-Sleep -Seconds 60
         } catch {
