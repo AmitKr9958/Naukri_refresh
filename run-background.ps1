@@ -62,6 +62,28 @@ try {
     # Keep Node automation alive independently of Task Scheduler restart policy.
     # If refresh.js exits, restart it after 60 seconds.
     while ($true) {
+        # Ensure only one refresh.js instance belongs to this launcher.
+        # A stale/orphan Node process can otherwise keep the same persistent
+        # Chromium profile alive and create competing cycles.
+        try {
+            $existingRefresh = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.ProcessId -ne $PID -and
+                    $_.Name -eq "node.exe" -and
+                    $_.CommandLine -and
+                    $_.CommandLine -like "*$refreshScript*"
+                }
+
+            foreach ($existing in $existingRefresh) {
+                try {
+                    Stop-Process -Id ([int]$existing.ProcessId) -Force -ErrorAction SilentlyContinue
+                    Write-Host "Stopped stale refresh.js process $($existing.ProcessId) before starting a single managed instance."
+                } catch {}
+            }
+        } catch {
+            Write-Host "Could not inspect stale refresh.js processes: $($_.Exception.Message)"
+        }
+
         Hide-NaukriBrowserWindows
         try {
             $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
