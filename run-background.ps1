@@ -7,27 +7,20 @@ $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $repo
 $env:HEADLESS = "false"
 
-# Keep Windows awake while this automation is running.
-# This prevents idle sleep without forcing the display to stay on.
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-
 public static class NaukriPower {
     [DllImport("kernel32.dll")]
     public static extern uint SetThreadExecutionState(uint esFlags);
-
     public const uint ES_CONTINUOUS = 0x80000000;
     public const uint ES_SYSTEM_REQUIRED = 0x00000001;
 }
 "@
 
-# Hide only Chromium windows belonging to this automation's dedicated
-# Playwright profile. This does not hide the user's normal Chrome windows.
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-
 public static class NaukriWindow {
     [DllImport("user32.dll")]
     public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
@@ -43,9 +36,8 @@ function Hide-NaukriBrowserWindows {
             Where-Object {
                 $_.CommandLine -and
                 $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $_.Name -match '^(chrome|msedge|chromium)(\.exe)?$'
+                $_.Name -match "^(chrome|msedge|chromium)(\.exe)?$"
             }
-
         foreach ($processInfo in $processes) {
             try {
                 $p = Get-Process -Id ([int]$processInfo.ProcessId) -ErrorAction SilentlyContinue
@@ -57,9 +49,6 @@ function Hide-NaukriBrowserWindows {
     } catch {}
 }
 
-# ES_SYSTEM_REQUIRED prevents Windows from entering idle sleep while the
-# refresh process is alive. ES_DISPLAY_REQUIRED is intentionally not used,
-# so the display can still turn off normally.
 [NaukriPower]::SetThreadExecutionState(
     [NaukriPower]::ES_CONTINUOUS -bor [NaukriPower]::ES_SYSTEM_REQUIRED
 ) | Out-Null
@@ -69,22 +58,29 @@ $exitCode = 1
 try {
     $node = (Get-Command node.exe -ErrorAction Stop).Source
     $refreshScript = Join-Path $repo "refresh.js"
-    $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
 
-    # Hide the headed Chromium window as soon as it appears, then keep enforcing
-    # the hidden state while the long-running refresh process is alive.
-    while (-not $nodeProcess.HasExited) {
+    # Keep Node automation alive independently of Task Scheduler restart policy.
+    # If refresh.js exits, restart it after 60 seconds.
+    while ($true) {
         Hide-NaukriBrowserWindows
-        Start-Sleep -Milliseconds 750
-        try { $nodeProcess.Refresh() } catch {}
+        try {
+            $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
+            while (-not $nodeProcess.HasExited) {
+                Hide-NaukriBrowserWindows
+                Start-Sleep -Milliseconds 750
+                try { $nodeProcess.Refresh() } catch {}
+            }
+            Hide-NaukriBrowserWindows
+            $exitCode = $nodeProcess.ExitCode
+            Write-Host "Naukri Refresh exited with code $exitCode. Restarting in 60 seconds."
+            Start-Sleep -Seconds 60
+        } catch {
+            Write-Host "Could not start Naukri Refresh: $($_.Exception.Message)"
+            Start-Sleep -Seconds 60
+        }
     }
-
-    Hide-NaukriBrowserWindows
-    $exitCode = $nodeProcess.ExitCode
 }
 finally {
-    # Return Windows to its normal power-management behavior when the
-    # automation stops.
     [NaukriPower]::SetThreadExecutionState([NaukriPower]::ES_CONTINUOUS) | Out-Null
 }
 
