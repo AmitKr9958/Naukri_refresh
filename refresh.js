@@ -351,6 +351,23 @@ async function launchBrowserContext() {
   }
 }
 
+function contextIsClosed(ctx) {
+  try {
+    return !ctx || (typeof ctx.isClosed === "function" && ctx.isClosed());
+  } catch {
+    return true;
+  }
+}
+
+async function recoverBrowserContext(currentContext) {
+  if (currentContext) {
+    await currentContext.close().catch(() => {});
+  }
+
+  log("Browser context is closed; relaunching the saved Naukri Chromium session.");
+  return await launchBrowserContext();
+}
+
 (async () => {
   if (!fs.existsSync(profileDir)) {
     throw new Error("No saved Naukri session. Run: npm run login");
@@ -377,7 +394,25 @@ async function launchBrowserContext() {
       cycle++;
 
       try {
-        const page = context.pages()[0] || await context.newPage();
+        // The long-running Chromium session can occasionally disappear after
+        // many cycles. Never keep using a closed BrowserContext: recover it
+        // before creating the next page so one transient browser crash does not
+        // turn into repeated "Target page, context or browser has been closed"
+        // failures for every subsequent cycle.
+        if (contextIsClosed(context)) {
+          context = await recoverBrowserContext(context);
+        }
+
+        let page = null;
+        try {
+          page = context.pages().find(candidate => !candidate.isClosed()) || null;
+        } catch {
+          page = null;
+        }
+
+        if (!page) {
+          page = await context.newPage();
+        }
 
         log("Cycle " + cycle + ": opening profile");
         await openProfile(page);
@@ -398,12 +433,34 @@ async function launchBrowserContext() {
 
         failures = 0;
       } catch (error) {
-        failures++;
-        log("Cycle " + cycle + " failed: " + error.message);
-        await sendFailureAlert(
-          "Naukri Refresh - cycle " + cycle + " failed",
-          error.message
-        );
+        const errorMessage = String(error && error.message || error);
+        const contextClosedError =
+          /browserContext\.newPage: Target page, context or browser has been closed/i.test(errorMessage) ||
+          /Target page, context or browser has been closed/i.test(errorMessage) ||
+          /browser context.*closed/i.test(errorMessage);
+
+        if (contextClosedError) {
+          log("Cycle " + cycle + " detected a closed browser context; recovering Chromium session.");
+          try {
+            context = await recoverBrowserContext(context);
+            failures = 0;
+            log("Cycle " + cycle + ": browser session recovered successfully.");
+          } catch (recoveryError) {
+            failures++;
+            log("Cycle " + cycle + ": browser session recovery failed: " + recoveryError.message);
+            await sendFailureAlert(
+              "Naukri Refresh - browser recovery failed",
+              recoveryError.message
+            );
+          }
+        } else {
+          failures++;
+          log("Cycle " + cycle + " failed: " + errorMessage);
+          await sendFailureAlert(
+            "Naukri Refresh - cycle " + cycle + " failed",
+            errorMessage
+          );
+        }
 
         if (failures >= MAX_FAILURES) {
           log("Stopping after " + failures + " consecutive failures.");
