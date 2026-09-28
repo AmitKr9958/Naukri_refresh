@@ -30,6 +30,31 @@ public static class NaukriWindow {
 $profileMarker = [IO.Path]::GetFullPath((Join-Path $repo "naukri-browser-profile"))
 $profileMarker = $profileMarker.TrimEnd([IO.Path]::DirectorySeparatorChar)
 
+function Clear-StaleNaukriProfileLock {
+    # Chromium can leave Singleton* lock artifacts after an unexpected crash.
+    # Only remove them when no automation browser process is using this profile.
+    try {
+        $activeBrowsers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.CommandLine -and
+                $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $_.Name -match "^(chrome|msedge|chromium)(\\.exe)?$"
+            }
+
+        if (-not $activeBrowsers) {
+            foreach ($lockName in @("SingletonLock", "SingletonCookie", "SingletonSocket")) {
+                $lockPath = Join-Path $profileMarker $lockName
+                if (Test-Path -LiteralPath $lockPath) {
+                    Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+                    Write-Host "Removed stale Chromium profile lock artifact: $lockName"
+                }
+            }
+        }
+    } catch {
+        Write-Host "Could not clear stale Chromium profile locks: $($_.Exception.Message)"
+    }
+}
+
 function Hide-NaukriBrowserWindows {
     try {
         $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
