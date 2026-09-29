@@ -48,34 +48,33 @@ function Get-NaukriAutomationProcesses {
 
 function Stop-NaukriAutomationBrowsers {
     # Chromium uses a process tree (browser + renderer/GPU/network/utility
-    # children). Killing only chrome.exe can leave a child holding the
-    # persistent profile lock. Use taskkill /T only for processes whose
-    # command line contains this automation's exact profile path.
+    # children). Kill every process in the exact managed automation domain.
     try {
-        $processes = @(Get-NaukriAutomationProcesses)
+        for ($pass = 1; $pass -le 3; $pass++) {
+            $processes = @(Get-NaukriAutomationProcesses)
 
-        foreach ($processInfo in $processes) {
-            try {
-                & taskkill.exe /PID ([string]$processInfo.ProcessId) /T /F 2>$null | Out-Null
-                Write-Host "Stopped automation Chromium process tree rooted at PID $($processInfo.ProcessId)."
-            } catch {}
-        }
-
-        # Wait briefly for Chromium child processes to disappear.
-        for ($attempt = 1; $attempt -le 10; $attempt++) {
-            $remaining = @(Get-NaukriAutomationProcesses)
-            if (-not $remaining) {
-                return
+            foreach ($processInfo in $processes) {
+                try {
+                    & taskkill.exe /PID ([string]$processInfo.ProcessId) /T /F 2>$null | Out-Null
+                    Write-Host "Stopped managed automation process tree rooted at PID $($processInfo.ProcessId)."
+                } catch {}
             }
-            Start-Sleep -Milliseconds 500
+
+            for ($attempt = 1; $attempt -le 10; $attempt++) {
+                $remaining = @(Get-NaukriAutomationProcesses)
+                if (-not $remaining) {
+                    return
+                }
+                Start-Sleep -Milliseconds 500
+            }
         }
 
         $remaining = @(Get-NaukriAutomationProcesses)
         if ($remaining) {
-            Write-Host "Warning: $($remaining.Count) automation Chromium process(es) still remain after cleanup."
+            Write-Host "Warning: $($remaining.Count) managed automation process(es) still remain after cleanup."
         }
     } catch {
-        Write-Host "Could not clean automation Chromium process tree: $($_.Exception.Message)"
+        Write-Host "Could not clean managed automation process tree: $($_.Exception.Message)"
     }
 }
 
