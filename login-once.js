@@ -10,24 +10,30 @@ const profileUrl = process.env.PROFILE_URL || "https://www.naukri.com/mnjuser/pr
   let context = null;
   let finished = false;
 
-  const closeContext = async (exitCode = 0) => {
-    if (finished) return;
+  const closeContext = async () => {
+    if (finished) return true;
     finished = true;
 
     try {
       if (context) {
         await context.close();
       }
+      return true;
     } catch (error) {
       console.error("Could not close Naukri browser session: " + error.message);
-      exitCode = 1;
+      return false;
     }
-
-    process.exit(exitCode);
   };
 
-  process.once("SIGINT", () => { void closeContext(130); });
-  process.once("SIGTERM", () => { void closeContext(143); });
+  process.once("SIGINT", async () => {
+    await closeContext();
+    process.exit(130);
+  });
+
+  process.once("SIGTERM", async () => {
+    await closeContext();
+    process.exit(143);
+  });
 
   try {
     context = await chromium.launchPersistentContext(profileDir, {
@@ -49,11 +55,15 @@ const profileUrl = process.env.PROFILE_URL || "https://www.naukri.com/mnjuser/pr
 
     process.stdin.once("data", async () => {
       console.log("Closing browser and saving session...");
-      await closeContext(0);
-      console.log("Session saved in ./naukri-browser-profile");
+      const closed = await closeContext();
+      if (closed) {
+        console.log("Session saved in ./naukri-browser-profile");
+      }
+      process.exit(closed ? 0 : 1);
     });
   } catch (error) {
     console.error("Naukri login session failed: " + error.message);
-    await closeContext(1);
+    await closeContext();
+    process.exit(1);
   }
 })();
