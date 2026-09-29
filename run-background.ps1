@@ -145,8 +145,11 @@ try {
     # Keep Node automation alive independently of Task Scheduler restart policy.
     # If refresh.js exits, restart it after 60 seconds.
     while ($true) {
-        # Ensure only one managed refresh.js process exists.
+        # Ensure only one managed refresh.js process exists and reset the
+        # complete automation domain before every launch.
         try {
+            Reset-NaukriProfileLocks
+
             $existingRefresh = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                 Where-Object {
                     $_.ProcessId -ne $PID -and
@@ -155,11 +158,13 @@ try {
                     $_.CommandLine -like "*$refreshScript*"
                 })
 
-            foreach ($existing in $existingRefresh) {
-                try {
-                    & taskkill.exe /PID ([string]$existing.ProcessId) /T /F 2>$null | Out-Null
-                    Write-Host "Stopped stale refresh.js process tree rooted at PID $($existing.ProcessId)."
-                } catch {}
+            if ($existingRefresh) {
+                foreach ($existing in $existingRefresh) {
+                    try {
+                        & taskkill.exe /PID ([string]$existing.ProcessId) /T /F 2>$null | Out-Null
+                        Write-Host "Stopped stale refresh.js process tree rooted at PID $($existing.ProcessId)."
+                    } catch {}
+                }
             }
 
             for ($attempt = 1; $attempt -le 10; $attempt++) {
@@ -173,13 +178,14 @@ try {
                 if (-not $remaining) { break }
                 Start-Sleep -Milliseconds 500
             }
+
+            # A stale Node process can be outside the profile-marker query, so
+            # perform the profile reset once more after the Node guard.
+            Reset-NaukriProfileLocks
         } catch {
             Write-Host "Could not clean stale refresh.js processes: $($_.Exception.Message)"
         }
 
-        # Clean the complete managed process tree and any stale
-        # persistent-profile locks BEFORE launching refresh.js.
-        Reset-NaukriProfileLocks
         Hide-NaukriBrowserWindows
         try {
             $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
