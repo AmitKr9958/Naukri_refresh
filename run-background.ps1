@@ -109,6 +109,33 @@ try {
             Write-Host "Could not inspect stale refresh.js processes: $($_.Exception.Message)"
         }
 
+        # Clean any orphaned automation Chromium processes and stale Chromium
+        # profile-lock artifacts BEFORE launching refresh.js. This is important
+        # because a previous Node/Chromium crash can leave the persistent profile
+        # locked even though no healthy automation session is running.
+        try {
+            $automationBrowsers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.CommandLine -and
+                    $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                    $_.Name -match "^(chrome|msedge|chromium)(\\.exe)?$"
+                }
+
+            if ($automationBrowsers) {
+                Write-Host "Found $($automationBrowsers.Count) existing automation browser process(es)."
+                foreach ($browser in $automationBrowsers) {
+                    try {
+                        Stop-Process -Id ([int]$browser.ProcessId) -Force -ErrorAction SilentlyContinue
+                    } catch {}
+                }
+
+                Start-Sleep -Seconds 2
+            }
+        } catch {
+            Write-Host "Could not inspect/clean automation browser processes before launch: $($_.Exception.Message)"
+        }
+
+        Clear-StaleNaukriProfileLock
         Hide-NaukriBrowserWindows
         try {
             $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
