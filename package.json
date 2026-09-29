@@ -6,7 +6,8 @@
   "scripts": {
     "install-browser": "playwright install chromium",
     "login": "node login-once.js",
-    "start": "node refresh.js"
+    "start": "node refresh.js",
+    "test": "node --check refresh.js && node --check login-once.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
