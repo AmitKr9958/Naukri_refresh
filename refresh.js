@@ -251,6 +251,10 @@ async function openProfile(page) {
 
   for (let attempt = 1; attempt <= NAVIGATION_RETRIES; attempt++) {
     try {
+      if (page.isClosed()) {
+        throw new Error("Naukri profile page is closed.");
+      }
+
       if (attempt > 1) {
         log("Profile navigation retry " + attempt + "/" + NAVIGATION_RETRIES);
         await page.waitForTimeout(RETRY_DELAY_MS);
@@ -258,7 +262,7 @@ async function openProfile(page) {
 
       await page.goto(PROFILE_URL, {
         waitUntil: "domcontentloaded",
-        timeout: 60000
+        timeout: 45000
       });
 
       await page.waitForTimeout(2500);
@@ -270,6 +274,12 @@ async function openProfile(page) {
         "Profile navigation attempt " + attempt + "/" + NAVIGATION_RETRIES +
         " failed: " + error.message
       );
+
+      // A timed-out page can remain in a bad loading state. Dispose of that
+      // page before retrying so the next attempt always starts clean.
+      if (attempt < NAVIGATION_RETRIES && page && !page.isClosed()) {
+        await page.close().catch(() => {});
+      }
     }
   }
 
@@ -279,6 +289,34 @@ async function openProfile(page) {
     " attempts. Last error: " +
     (lastError ? lastError.message : "unknown navigation error")
   );
+}
+
+async function createFreshPage(context) {
+  if (contextIsClosed(context)) {
+    throw new Error("Naukri browser context is closed.");
+  }
+
+  const existingPages = context.pages();
+
+  // Reuse only a healthy existing page; close stale/extra pages so a failed
+  // navigation cannot accumulate hidden tabs over many cycles.
+  let healthyPage = null;
+
+  for (const candidate of existingPages) {
+    if (candidate.isClosed()) continue;
+
+    if (!healthyPage) {
+      healthyPage = candidate;
+    } else {
+      await candidate.close().catch(() => {});
+    }
+  }
+
+  if (healthyPage) {
+    return healthyPage;
+  }
+
+  return await context.newPage();
 }
 
 async function setResumeFile(page, fileChooser = null) {
@@ -563,16 +601,7 @@ async function recoverBrowserContext(currentContext) {
           context = await recoverBrowserContext(context);
         }
 
-        let page = null;
-        try {
-          page = context.pages().find(candidate => !candidate.isClosed()) || null;
-        } catch {
-          page = null;
-        }
-
-        if (!page) {
-          page = await context.newPage();
-        }
+        let page = await createFreshPage(context);
 
         log("Cycle " + cycle + ": opening profile");
         await openProfile(page);
@@ -630,7 +659,43 @@ async function recoverBrowserContext(currentContext) {
         } else {
           failures++;
           log("Cycle " + cycle + " failed: " + errorMessage);
-          writeHealth("FAILED", cycle, { phase: "error", error: errorMessage });
+
+          // Navigation/network failures are recoverable. Dispose of the
+          // affected page and recreate the browser context before the next
+          // retry cycle so a poisoned page/context cannot persist.
+          if (/Could not open Naukri profile after|page.goto: Timeout|ERR_|Navigation timeout/i.test(errorMessage)) {
+            try {
+              if (context && !contextIsClosed(context)) {
+                await context.close().catch(() => {});
+              }
+              context = null;
+              writeHealth("RECOVERING", cycle, {
+                phase: "browser_recovery",
+                error: errorMessage
+              });
+              log("Cycle " + cycle + ": navigation failure; recreating Chromium session.");
+              context = await launchBrowserContext();
+              failures = Math.max(0, failures - 1);
+              log("Cycle " + cycle + ": Chromium session recreated successfully.");
+            } catch (recoveryError) {
+              log("Cycle " + cycle + ": Chromium session recreation failed: " + recoveryError.message);
+              await sendFailureAlert(
+                "Naukri Refresh - browser recreation failed",
+                recoveryError.message
+              );
+              await sendTelegramFailure(
+                cycle,
+                recoveryError.message,
+                "Browser recreation failed"
+              );
+            }
+          }
+
+          writeHealth("FAILED", cycle, {
+            phase: "error",
+            error: errorMessage,
+            recovery_attempted: true
+          });
           await sendFailureAlert(
             "Naukri Refresh - cycle " + cycle + " failed",
             errorMessage
