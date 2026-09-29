@@ -30,7 +30,24 @@ public static class NaukriWindow {
 $profileMarker = [IO.Path]::GetFullPath((Join-Path $repo "naukri-browser-profile"))
 $profileMarker = $profileMarker.TrimEnd([IO.Path]::DirectorySeparatorChar)
 
-$node = (Get-Command node.exe -ErrorAction Stop).Source
+$nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+if ($nodeCommand) {
+    $node = $nodeCommand.Source
+} else {
+    $nodeCandidates = @(
+        (Join-Path $env:ProgramFiles "nodejs\node.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\nodejs\node.exe")
+    )
+
+    $node = $nodeCandidates |
+        Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
+        Select-Object -First 1
+
+    if (-not $node) {
+        throw "node.exe was not found. Install Node.js or add node.exe to the scheduled-task PATH."
+    }
+}
+
 $refreshScript = Join-Path $repo "refresh.js"
 
 function Get-NaukriAutomationProcesses {
@@ -201,7 +218,7 @@ try {
 
         Hide-NaukriBrowserWindows
         try {
-            $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
+            $nodeProcess = Start-Process -FilePath $node -ArgumentList @('"' + $refreshScript + '"') -WorkingDirectory $repo -PassThru -WindowStyle Hidden
             while (-not $nodeProcess.HasExited) {
                 Hide-NaukriBrowserWindows
                 Start-Sleep -Milliseconds 750
