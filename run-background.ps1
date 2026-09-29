@@ -30,16 +30,53 @@ public static class NaukriWindow {
 $profileMarker = [IO.Path]::GetFullPath((Join-Path $repo "naukri-browser-profile"))
 $profileMarker = $profileMarker.TrimEnd([IO.Path]::DirectorySeparatorChar)
 
+function Get-NaukriAutomationProcesses {
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.CommandLine -and
+            $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        }
+}
+
+function Stop-NaukriAutomationBrowsers {
+    # Chromium uses a process tree (browser + renderer/GPU/network/utility
+    # children). Killing only chrome.exe can leave a child holding the
+    # persistent profile lock. Use taskkill /T only for processes whose
+    # command line contains this automation's exact profile path.
+    try {
+        $processes = @(Get-NaukriAutomationProcesses)
+
+        foreach ($processInfo in $processes) {
+            try {
+                & taskkill.exe /PID ([string]$processInfo.ProcessId) /T /F 2>$null | Out-Null
+                Write-Host "Stopped automation Chromium process tree rooted at PID $($processInfo.ProcessId)."
+            } catch {}
+        }
+
+        # Wait briefly for Chromium child processes to disappear.
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
+            $remaining = @(Get-NaukriAutomationProcesses)
+            if (-not $remaining) {
+                return
+            }
+            Start-Sleep -Milliseconds 500
+        }
+
+        $remaining = @(Get-NaukriAutomationProcesses)
+        if ($remaining) {
+            Write-Host "Warning: $($remaining.Count) automation Chromium process(es) still remain after cleanup."
+        }
+    } catch {
+        Write-Host "Could not clean automation Chromium process tree: $($_.Exception.Message)"
+    }
+}
+
 function Clear-StaleNaukriProfileLock {
     # Chromium can leave Singleton* lock artifacts after an unexpected crash.
-    # Only remove them when no automation browser process is using this profile.
+    # Only remove them after every automation process using this exact profile
+    # has been terminated.
     try {
-        $activeBrowsers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.CommandLine -and
-                $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $_.Name -match "^(chrome|msedge|chromium)(\\.exe)?$"
-            }
+        $activeBrowsers = @(Get-NaukriAutomationProcesses)
 
         if (-not $activeBrowsers) {
             foreach ($lockName in @("SingletonLock", "SingletonCookie", "SingletonSocket")) {
@@ -109,32 +146,9 @@ try {
             Write-Host "Could not inspect stale refresh.js processes: $($_.Exception.Message)"
         }
 
-        # Clean any orphaned automation Chromium processes and stale Chromium
-        # profile-lock artifacts BEFORE launching refresh.js. This is important
-        # because a previous Node/Chromium crash can leave the persistent profile
-        # locked even though no healthy automation session is running.
-        try {
-            $automationBrowsers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $_.CommandLine -and
-                    $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                    $_.Name -match "^(chrome|msedge|chromium)(\\.exe)?$"
-                }
-
-            if ($automationBrowsers) {
-                Write-Host "Found $($automationBrowsers.Count) existing automation browser process(es)."
-                foreach ($browser in $automationBrowsers) {
-                    try {
-                        Stop-Process -Id ([int]$browser.ProcessId) -Force -ErrorAction SilentlyContinue
-                    } catch {}
-                }
-
-                Start-Sleep -Seconds 2
-            }
-        } catch {
-            Write-Host "Could not inspect/clean automation browser processes before launch: $($_.Exception.Message)"
-        }
-
+        # Clean the complete automation Chromium process tree and any stale
+        # persistent-profile locks BEFORE launching refresh.js.
+        Stop-NaukriAutomationBrowsers
         Clear-StaleNaukriProfileLock
         Hide-NaukriBrowserWindows
         try {
@@ -148,31 +162,10 @@ try {
             $exitCode = $nodeProcess.ExitCode
 
             # refresh.js can exit while headed Chromium survives as an orphan.
-            # Because the persistent profile can only be opened by one Chromium
-            # process tree, clean up only browser processes belonging to this
-            # automation profile before restarting. This runs only after the
-            # Node process has already exited, so it cannot interrupt a healthy
-            # refresh cycle or any normal Chrome session.
-            try {
-                $staleBrowsers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-                    Where-Object {
-                        $_.CommandLine -and
-                        $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                        $_.Name -match "^(chrome|msedge|chromium)(\.exe)?$"
-                    }
-
-                foreach ($browser in $staleBrowsers) {
-                    try {
-                        Stop-Process -Id ([int]$browser.ProcessId) -Force -ErrorAction SilentlyContinue
-                    } catch {}
-                }
-
-                if ($staleBrowsers) {
-                    Write-Host "Cleaned up $($staleBrowsers.Count) orphan automation browser process(es) before restart."
-                }
-            } catch {
-                Write-Host "Could not clean up orphan automation browser processes: $($_.Exception.Message)"
-            }
+            # Clean the complete process tree, then clear stale profile locks
+            # before the next restart.
+            Stop-NaukriAutomationBrowsers
+            Clear-StaleNaukriProfileLock
 
             Write-Host "Naukri Refresh exited with code $exitCode. Restarting in 60 seconds."
             Start-Sleep -Seconds 60
