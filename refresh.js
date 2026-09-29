@@ -9,7 +9,7 @@ const RESUME_PATH = path.resolve(process.env.RESUME_PATH || "");
 const INTERVAL_MINUTES = Math.max(1, Number(process.env.REFRESH_INTERVAL_MINUTES || 20));
 const MAX_FAILURES = Math.max(1, Number(process.env.MAX_CONSECUTIVE_FAILURES || 3));
 const HEADLESS = String(process.env.HEADLESS || "false").toLowerCase() === "true";
-const DEBUG_PROFILE_UI = String(process.env.DEBUG_PROFILE_UI || "true").toLowerCase() === "true";
+const DEBUG_PROFILE_UI = String(process.env.DEBUG_PROFILE_UI || "false").toLowerCase() === "true";
 const ALERT_EMAIL = String(process.env.ALERT_EMAIL || "").trim();
 const SMTP_HOST = String(process.env.SMTP_HOST || "").trim();
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
