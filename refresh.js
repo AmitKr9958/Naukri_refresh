@@ -629,7 +629,10 @@ async function recoverBrowserContext(currentContext) {
 
     const stop = async () => {
       log("Stopping...");
+      writeHealth("STOPPING", 0, { phase: "shutdown" });
       if (context) await context.close().catch(() => {});
+      writeHealth("STOPPED", 0, { phase: "shutdown" });
+      releaseInstanceLock();
       process.exit(0);
     };
 
@@ -783,6 +786,7 @@ async function recoverBrowserContext(currentContext) {
           );
           writeHealth("STOPPED", cycle, { phase: "max_consecutive_failures", failures });
           await context.close().catch(() => {});
+          releaseInstanceLock();
           process.exit(1);
         }
       }
@@ -801,6 +805,7 @@ async function recoverBrowserContext(currentContext) {
       error.message
     );
     await sendTelegramFailure(0, error.message, "Startup failed");
+    releaseInstanceLock();
     process.exit(1);
   } finally {
     releaseInstanceLock();
