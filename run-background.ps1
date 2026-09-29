@@ -63,17 +63,59 @@ function Get-NaukriAutomationProcesses {
         }
 }
 
+function Get-NaukriProcessTree {
+    param([int]$RootPid)
+
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $result = @()
+    $pending = New-Object System.Collections.Generic.Queue[int]
+    $pending.Enqueue($RootPid)
+
+    while ($pending.Count -gt 0) {
+        $currentPid = $pending.Dequeue()
+        foreach ($processInfo in ($all | Where-Object { $_.ParentProcessId -eq $currentPid })) {
+            $result += $processInfo
+            $pending.Enqueue([int]$processInfo.ProcessId)
+        }
+    }
+
+    $result
+}
+
 function Stop-NaukriAutomationBrowsers {
     # Chromium uses a process tree (browser + renderer/GPU/network/utility
-    # children). Kill every process in the exact managed automation domain.
+    # children). Kill only the automation domain, including descendants of
+    # the managed refresh.js process even when a Chromium child does not expose
+    # the profile path in its command line.
     try {
         for ($pass = 1; $pass -le 3; $pass++) {
             $processes = @(Get-NaukriAutomationProcesses)
+            $refreshRoots = @(
+                $processes |
+                    Where-Object {
+                        $_.Name -eq "node.exe" -and
+                        $_.CommandLine -and
+                        $_.CommandLine.IndexOf($refreshScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                    }
+            )
 
-            foreach ($processInfo in $processes) {
+            foreach ($root in $refreshRoots) {
+                foreach ($child in @(Get-NaukriProcessTree -RootPid ([int]$root.ProcessId) | Sort-Object @{Expression={ $_.ProcessId }; Descending=$true})) {
+                    try {
+                        & taskkill.exe /PID ([string]$child.ProcessId) /T /F 2>$null | Out-Null
+                    } catch {}
+                }
+
+                try {
+                    & taskkill.exe /PID ([string]$root.ProcessId) /T /F 2>$null | Out-Null
+                    Write-Host "Stopped managed refresh.js process tree rooted at PID $($root.ProcessId)."
+                } catch {}
+            }
+
+            foreach ($processInfo in @(Get-NaukriAutomationProcesses)) {
                 try {
                     & taskkill.exe /PID ([string]$processInfo.ProcessId) /T /F 2>$null | Out-Null
-                    Write-Host "Stopped managed automation process tree rooted at PID $($processInfo.ProcessId)."
+                    Write-Host "Stopped remaining managed automation process tree rooted at PID $($processInfo.ProcessId)."
                 } catch {}
             }
 
@@ -140,7 +182,8 @@ function Reset-NaukriProfileLocks {
 
     $remaining = @(Get-NaukriAutomationProcesses)
     if ($remaining) {
-        Write-Host "Warning: managed process(es) still remain after repeated reset attempts."
+        $ids = ($remaining | ForEach-Object { $_.ProcessId }) -join ","
+        Write-Host "Warning: managed process(es) still remain after repeated reset attempts. PIDs: $ids"
     } else {
         Clear-StaleNaukriProfileLock
     }
