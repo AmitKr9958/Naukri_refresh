@@ -50,32 +50,68 @@ if ($nodeCommand) {
 
 $refreshScript = Join-Path $repo "refresh.js"
 
-function Get-NaukriAutomationProcesses {
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.CommandLine -and (
-                $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                (
-                    $_.Name -eq "node.exe" -and
-                    $_.CommandLine.IndexOf($refreshScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
-                )
-            )
-        }
-}
-
 function Get-NaukriProcessTree {
     param([int]$RootPid)
 
     $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     $result = @()
-    $pending = New-Object System.Collections.Generic.Queue[int]
+    $seen = New-Object 'System.Collections.Generic.HashSet[int]'
+    $pending = New-Object 'System.Collections.Generic.Queue[int]'
+
+    [void]$seen.Add($RootPid)
     $pending.Enqueue($RootPid)
 
     while ($pending.Count -gt 0) {
         $currentPid = $pending.Dequeue()
         foreach ($processInfo in ($all | Where-Object { $_.ParentProcessId -eq $currentPid })) {
-            $result += $processInfo
-            $pending.Enqueue([int]$processInfo.ProcessId)
+            $childPid = [int]$processInfo.ProcessId
+            if ($seen.Add($childPid)) {
+                $result += $processInfo
+                $pending.Enqueue($childPid)
+            }
+        }
+    }
+
+    $result
+}
+
+function Test-NaukriManagedProcess {
+    param([object]$ProcessInfo)
+
+    if (-not $ProcessInfo) { return $false }
+
+    if (
+        $ProcessInfo.Name -eq "node.exe" -and
+        $ProcessInfo.CommandLine -and
+        $ProcessInfo.CommandLine.IndexOf($refreshScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    ) {
+        return $true
+    }
+
+    if (
+        $ProcessInfo.CommandLine -and
+        $ProcessInfo.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    ) {
+        return $true
+    }
+
+    return $false
+}
+
+function Get-NaukriAutomationProcesses {
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $roots = @($all | Where-Object { Test-NaukriManagedProcess $_ })
+    $result = @($roots)
+
+    foreach ($root in @($roots | Where-Object {
+        $_.Name -eq "node.exe" -and
+        $_.CommandLine -and
+        $_.CommandLine.IndexOf($refreshScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })) {
+        foreach ($child in @(Get-NaukriProcessTree -RootPid ([int]$root.ProcessId))) {
+            if ($result.ProcessId -notcontains $child.ProcessId) {
+                $result += $child
+            }
         }
     }
 
