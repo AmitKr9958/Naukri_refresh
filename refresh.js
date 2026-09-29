@@ -677,6 +677,7 @@ async function recoverBrowserContext(currentContext) {
               context = await launchBrowserContext();
               failures = Math.max(0, failures - 1);
               log("Cycle " + cycle + ": Chromium session recreated successfully.");
+              await sendTelegramRecovery(cycle);
             } catch (recoveryError) {
               log("Cycle " + cycle + ": Chromium session recreation failed: " + recoveryError.message);
               await sendFailureAlert(
@@ -694,7 +695,8 @@ async function recoverBrowserContext(currentContext) {
           writeHealth("FAILED", cycle, {
             phase: "error",
             error: errorMessage,
-            recovery_attempted: true
+            recovery_attempted: true,
+            next_action: "Fresh browser context will be used on the next cycle"
           });
           await sendFailureAlert(
             "Naukri Refresh - cycle " + cycle + " failed",
