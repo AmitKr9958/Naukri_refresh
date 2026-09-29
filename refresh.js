@@ -535,9 +535,8 @@ async function launchBrowserContext() {
 
     if (/existing browser session|profile is already in use|user-data-dir/i.test(message)) {
       throw new Error(
-        "The saved Naukri Chromium profile is already open in another browser/process. " +
-        "Close every browser window using this automation session (especially the Naukri automation window), " +
-        "then run npm start again. Your saved login/session is not being deleted."
+        "The saved Naukri Chromium profile is currently locked by another process. " +
+        "The background launcher will clean and retry automatically; no manual action is required."
       );
     }
 
