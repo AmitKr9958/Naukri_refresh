@@ -161,7 +161,7 @@ try {
             Write-Host "Could not clean stale refresh.js processes: $($_.Exception.Message)"
         }
 
-        # Clean the complete automation Chromium process tree and any stale
+        # Clean the complete managed process tree and any stale
         # persistent-profile locks BEFORE launching refresh.js.
         Stop-NaukriAutomationBrowsers
         Clear-StaleNaukriProfileLock
