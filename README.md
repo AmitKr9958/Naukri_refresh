@@ -18,7 +18,8 @@ The background task hides the PowerShell terminal and hides the automation Chrom
 
 The background launcher also requests that Windows keep the system awake while the automation is running. The display is not forced to stay on, so the screen can turn off normally.
 
-Runtime logs are written to `logs\\naukri-refresh.log`. The automation also maintains `naukri-refresh-health.json` with the latest cycle/status and rotates the main log after it reaches the configured size.
+Runtime logs are written to `logs\
+aukri-refresh.log`. The automation also maintains `naukri-refresh-health.json` with the latest cycle/status and rotates the main log after it reaches the configured size.
 
 ### Self-healing background execution
 
@@ -26,7 +27,11 @@ Runtime logs are written to `logs\\naukri-refresh.log`. The automation also main
 - If refresh.js exits, the launcher waits 60 seconds and starts it again.
 - If PowerShell itself exits unexpectedly, Task Scheduler has its own restart policy.
 - Only one scheduled-task instance is allowed at a time.
-- The existing Naukri navigation/upload retry logic remains unchanged.\n- `refresh.js` has its own PID lock, so manually starting a second copy cannot create a competing Chromium profile session.\n- Browser-context failures are recovered automatically when possible.\n- Successful cycles, failures, and browser recovery events can be sent to Telegram at no cost.\n- The log is rotated automatically to prevent unbounded disk growth.
+- The existing Naukri navigation/upload retry logic remains unchanged.
+- `refresh.js` has its own PID lock, so manually starting a second copy cannot create a competing Chromium profile session.
+- Browser-context failures are recovered automatically when possible.
+- Successful cycles, failures, and browser recovery events can be sent to Telegram at no cost.
+- The log is rotated automatically to prevent unbounded disk growth.
 - A Node/browser failure therefore does not permanently stop the background service.
 
 Install or repair the task after pulling updates:
@@ -64,7 +69,8 @@ Set `TELEGRAM_ENABLED=true`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID` in you
 
 Before restarting the background task after a code update:
 
-    node --check refresh.js\n    git status --short
+    node --check refresh.js
+    git status --short
 
 Do not run `node refresh.js` manually while the scheduled task is already running. The built-in PID lock and the background launcher both protect the saved Chromium profile, but one managed instance is the intended operating mode.
 
