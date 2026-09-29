@@ -33,8 +33,13 @@ $profileMarker = $profileMarker.TrimEnd([IO.Path]::DirectorySeparatorChar)
 function Get-NaukriAutomationProcesses {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
-            $_.CommandLine -and
-            $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            $_.CommandLine -and (
+                $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                (
+                    $_.Name -eq "node.exe" -and
+                    $_.CommandLine.IndexOf($refreshScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                )
+            )
         }
 }
 
