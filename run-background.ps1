@@ -81,12 +81,12 @@ function Stop-NaukriAutomationBrowsers {
 
 function Clear-StaleNaukriProfileLock {
     # Chromium can leave Singleton* lock artifacts after an unexpected crash.
-    # Only remove them after every automation process using this exact profile
-    # has been terminated.
+    # Only remove them after every managed refresh.js/Chromium process has been
+    # terminated. The launcher owns this entire automation profile.
     try {
-        $activeBrowsers = @(Get-NaukriAutomationProcesses)
+        $activeProcesses = @(Get-NaukriAutomationProcesses)
 
-        if (-not $activeBrowsers) {
+        if (-not $activeProcesses) {
             foreach ($lockName in @("SingletonLock", "SingletonCookie", "SingletonSocket")) {
                 $lockPath = Join-Path $profileMarker $lockName
                 if (Test-Path -LiteralPath $lockPath) {
@@ -94,9 +94,25 @@ function Clear-StaleNaukriProfileLock {
                     Write-Host "Removed stale Chromium profile lock artifact: $lockName"
                 }
             }
+
+            return
         }
+
+        Write-Host "Managed automation process still present; stale profile lock cleanup deferred."
     } catch {
         Write-Host "Could not clear stale Chromium profile locks: $($_.Exception.Message)"
+    }
+}
+
+function Reset-NaukriProfileLocks {
+    # Last-resort self-healing path. Only runs after the launcher has verified
+    # that no managed refresh.js/Chromium process is alive.
+    Stop-NaukriAutomationBrowsers
+    Clear-StaleNaukriProfileLock
+
+    $remaining = @(Get-NaukriAutomationProcesses)
+    if ($remaining) {
+        Write-Host "Warning: managed process(es) still remain after reset attempt."
     }
 }
 
@@ -163,8 +179,7 @@ try {
 
         # Clean the complete managed process tree and any stale
         # persistent-profile locks BEFORE launching refresh.js.
-        Stop-NaukriAutomationBrowsers
-        Clear-StaleNaukriProfileLock
+        Reset-NaukriProfileLocks
         Hide-NaukriBrowserWindows
         try {
             $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
@@ -179,8 +194,7 @@ try {
             # refresh.js can exit while headed Chromium survives as an orphan.
             # Clean the complete process tree, then clear stale profile locks
             # before the next restart.
-            Stop-NaukriAutomationBrowsers
-            Clear-StaleNaukriProfileLock
+            Reset-NaukriProfileLocks
 
             Write-Host "Naukri Refresh exited with code $exitCode. Restarting in 60 seconds."
             Start-Sleep -Seconds 60
