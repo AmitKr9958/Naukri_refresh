@@ -105,14 +105,28 @@ function Clear-StaleNaukriProfileLock {
 }
 
 function Reset-NaukriProfileLocks {
-    # Last-resort self-healing path. Only runs after the launcher has verified
-    # that no managed refresh.js/Chromium process is alive.
-    Stop-NaukriAutomationBrowsers
-    Clear-StaleNaukriProfileLock
+    # Last-resort self-healing path. Run repeatedly until the exact managed
+    # process domain is gone, then remove stale Chromium lock artifacts.
+    for ($pass = 1; $pass -le 3; $pass++) {
+        Stop-NaukriAutomationBrowsers
+        $remaining = @(Get-NaukriAutomationProcesses)
+
+        if (-not $remaining) {
+            Clear-StaleNaukriProfileLock
+            $afterLockCleanup = @(Get-NaukriAutomationProcesses)
+            if (-not $afterLockCleanup) {
+                return
+            }
+        }
+
+        Start-Sleep -Milliseconds 750
+    }
 
     $remaining = @(Get-NaukriAutomationProcesses)
     if ($remaining) {
-        Write-Host "Warning: managed process(es) still remain after reset attempt."
+        Write-Host "Warning: managed process(es) still remain after repeated reset attempts."
+    } else {
+        Clear-StaleNaukriProfileLock
     }
 }
 
