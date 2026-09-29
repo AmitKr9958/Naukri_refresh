@@ -4,23 +4,38 @@ const fs = require("fs");
 const path = require("path");
 require("dotenv").config();
 
+function readPositiveNumberEnv(name, fallback, minimum = 1, integer = false) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return fallback;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < minimum) {
+    return fallback;
+  }
+
+  return integer ? Math.floor(parsed) : parsed;
+}
+
 const PROFILE_URL = process.env.PROFILE_URL || "https://www.naukri.com/mnjuser/profile";
 const RESUME_PATH = path.resolve(process.env.RESUME_PATH || "");
-const INTERVAL_MINUTES = Math.max(1, Number(process.env.REFRESH_INTERVAL_MINUTES || 20));
-const MAX_FAILURES = Math.max(1, Number(process.env.MAX_CONSECUTIVE_FAILURES || 3));
+const INTERVAL_MINUTES = readPositiveNumberEnv("REFRESH_INTERVAL_MINUTES", 20, 1, true);
+const MAX_FAILURES = readPositiveNumberEnv("MAX_CONSECUTIVE_FAILURES", 3, 1, true);
 const HEADLESS = String(process.env.HEADLESS || "false").toLowerCase() === "true";
 const DEBUG_PROFILE_UI = String(process.env.DEBUG_PROFILE_UI || "false").toLowerCase() === "true";
 const ALERT_EMAIL = String(process.env.ALERT_EMAIL || "").trim();
 const SMTP_HOST = String(process.env.SMTP_HOST || "").trim();
-const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_PORT = readPositiveNumberEnv("SMTP_PORT", 587, 1, true);
 const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").toLowerCase() === "true";
 const SMTP_USER = String(process.env.SMTP_USER || "").trim();
 const SMTP_PASS = String(process.env.SMTP_PASS || "");
-const ALERT_COOLDOWN_MINUTES = Math.max(1, Number(process.env.ALERT_COOLDOWN_MINUTES || 60));
+const ALERT_COOLDOWN_MINUTES = readPositiveNumberEnv("ALERT_COOLDOWN_MINUTES", 60, 1, true);
 const TELEGRAM_ENABLED = String(process.env.TELEGRAM_ENABLED || "false").toLowerCase() === "true";
 const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
 const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || "").trim();
-const LOG_MAX_BYTES = Math.max(1024 * 1024, Number(process.env.LOG_MAX_BYTES || 5 * 1024 * 1024));
+const LOG_MAX_BYTES = readPositiveNumberEnv("LOG_MAX_BYTES", 5 * 1024 * 1024, 1024 * 1024, true);
+const NOTIFICATION_TIMEOUT_MS = readPositiveNumberEnv("NOTIFICATION_TIMEOUT_MS", 15000, 1000, true);
 const INSTANCE_LOCK_PATH = path.resolve("naukri-refresh.lock");
 const HEALTH_PATH = path.resolve("naukri-refresh-health.json");
 const NAVIGATION_RETRIES = 3;
@@ -40,7 +55,10 @@ const mailer = emailAlertsEnabled
       host: SMTP_HOST,
       port: SMTP_PORT,
       secure: SMTP_SECURE,
-      auth: { user: SMTP_USER, pass: SMTP_PASS }
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+      connectionTimeout: NOTIFICATION_TIMEOUT_MS,
+      greetingTimeout: NOTIFICATION_TIMEOUT_MS,
+      socketTimeout: NOTIFICATION_TIMEOUT_MS
     })
   : null;
 
@@ -85,18 +103,27 @@ async function sendTelegramMessage(text, eventLabel) {
   }
 
   try {
-    const response = await fetch(
-      "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: TELEGRAM_CHAT_ID,
-          text,
-          disable_web_page_preview: true
-        })
-      }
-    );
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), NOTIFICATION_TIMEOUT_MS);
+
+    let response;
+    try {
+      response = await fetch(
+        "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: TELEGRAM_CHAT_ID,
+            text,
+            disable_web_page_preview: true
+          }),
+          signal: controller.signal
+        }
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
 
     const responseText = await response.text();
 
@@ -407,7 +434,7 @@ async function tryNormalProfileUpdate(page) {
   return { attempted: false, resumeUploaded: false };
 }
 
-async function uploadResume(page) {
+async function uploadResume(page, context) {
   if (!RESUME_PATH || !fs.existsSync(RESUME_PATH)) {
     throw new Error("RESUME_PATH does not exist: " + RESUME_PATH);
   }
@@ -416,10 +443,29 @@ async function uploadResume(page) {
 
   for (let attempt = 1; attempt <= UPLOAD_RETRIES; attempt++) {
     try {
+      if (!page || page.isClosed()) {
+        if (!context || contextIsClosed(context)) {
+          throw new Error("Cannot retry resume upload because the browser context is closed.");
+        }
+        page = await createFreshPage(context);
+      }
+
       if (attempt > 1) {
         log("Resume upload retry " + attempt + "/" + UPLOAD_RETRIES);
         await page.waitForTimeout(RETRY_DELAY_MS);
+
+        // openProfile() intentionally closes a timed-out page before retrying.
+        // If that happens, create a fresh page instead of reusing a closed one.
+        if (page.isClosed()) {
+          page = await createFreshPage(context);
+        }
+
         await openProfile(page);
+
+        if (page.isClosed()) {
+          page = await createFreshPage(context);
+          await openProfile(page);
+        }
       }
 
       let input = page.locator('input[type="file"]').first();
@@ -482,10 +528,14 @@ async function uploadResume(page) {
         "Resume upload attempt " + attempt + "/" + UPLOAD_RETRIES +
         " failed: " + error.message
       );
+
+      if (page && page.isClosed() && context && !contextIsClosed(context)) {
+        page = await createFreshPage(context).catch(() => page);
+      }
     }
   }
 
-  if (DEBUG_PROFILE_UI) {
+  if (DEBUG_PROFILE_UI && page && !page.isClosed()) {
     await page.screenshot({
       path: path.join(logDir, "resume-upload-failure-" + Date.now() + ".png"),
       fullPage: true
@@ -615,7 +665,7 @@ async function recoverBrowserContext(currentContext) {
           log("Cycle " + cycle + ": resume upload action completed");
         } else {
           log("Cycle " + cycle + ": uploading resume");
-          await uploadResume(page);
+          await uploadResume(page, context);
           log("Cycle " + cycle + ": resume upload action completed");
         }
 
@@ -662,7 +712,13 @@ async function recoverBrowserContext(currentContext) {
           // Navigation/network failures are recoverable. Dispose of the
           // affected page and recreate the browser context before the next
           // retry cycle so a poisoned page/context cannot persist.
-          if (/Could not open Naukri profile after|page.goto: Timeout|ERR_|Navigation timeout/i.test(errorMessage)) {
+          const navigationFailure =
+            /Could not open Naukri profile after|page.goto: Timeout|ERR_|Navigation timeout/i.test(errorMessage);
+
+          let recoveredAfterNavigationFailure = false;
+          let recoveryErrorMessage = "";
+
+          if (navigationFailure) {
             try {
               if (context && !contextIsClosed(context)) {
                 await context.close().catch(() => {});
@@ -674,34 +730,44 @@ async function recoverBrowserContext(currentContext) {
               });
               log("Cycle " + cycle + ": navigation failure; recreating Chromium session.");
               context = await launchBrowserContext();
-              failures = Math.max(0, failures - 1);
+              failures = 0;
+              recoveredAfterNavigationFailure = true;
               log("Cycle " + cycle + ": Chromium session recreated successfully.");
+              writeHealth("RECOVERED", cycle, {
+                phase: "waiting",
+                recovery_at: new Date().toISOString(),
+                next_cycle: cycle + 1
+              });
               await sendTelegramRecovery(cycle);
             } catch (recoveryError) {
-              log("Cycle " + cycle + ": Chromium session recreation failed: " + recoveryError.message);
-              await sendFailureAlert(
-                "Naukri Refresh - browser recreation failed",
-                recoveryError.message
-              );
-              await sendTelegramFailure(
-                cycle,
-                recoveryError.message,
-                "Browser recreation failed"
-              );
+              recoveryErrorMessage = recoveryError.message;
+              log("Cycle " + cycle + ": Chromium session recreation failed: " + recoveryErrorMessage);
             }
           }
 
-          writeHealth("FAILED", cycle, {
-            phase: "error",
-            error: errorMessage,
-            recovery_attempted: true,
-            next_action: "Fresh browser context will be used on the next cycle"
-          });
-          await sendFailureAlert(
-            "Naukri Refresh - cycle " + cycle + " failed",
-            errorMessage
-          );
-          await sendTelegramFailure(cycle, errorMessage);
+          if (!recoveredAfterNavigationFailure) {
+            writeHealth("FAILED", cycle, {
+              phase: "error",
+              error: recoveryErrorMessage
+                ? errorMessage + " | Recovery failed: " + recoveryErrorMessage
+                : errorMessage,
+              recovery_attempted: navigationFailure,
+              next_action: "Fresh browser context will be used on the next cycle"
+            });
+
+            await sendFailureAlert(
+              "Naukri Refresh - cycle " + cycle + " failed",
+              recoveryErrorMessage
+                ? errorMessage + "\nBrowser recovery failed: " + recoveryErrorMessage
+                : errorMessage
+            );
+            await sendTelegramFailure(
+              cycle,
+              recoveryErrorMessage
+                ? errorMessage + " | Browser recovery failed: " + recoveryErrorMessage
+                : errorMessage
+            );
+          }
         }
 
         if (failures >= MAX_FAILURES) {
