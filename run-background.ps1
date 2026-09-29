@@ -30,6 +30,9 @@ public static class NaukriWindow {
 $profileMarker = [IO.Path]::GetFullPath((Join-Path $repo "naukri-browser-profile"))
 $profileMarker = $profileMarker.TrimEnd([IO.Path]::DirectorySeparatorChar)
 
+$node = (Get-Command node.exe -ErrorAction Stop).Source
+$refreshScript = Join-Path $repo "refresh.js"
+
 function Get-NaukriAutomationProcesses {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
@@ -123,9 +126,6 @@ function Hide-NaukriBrowserWindows {
 $exitCode = 1
 
 try {
-    $node = (Get-Command node.exe -ErrorAction Stop).Source
-    $refreshScript = Join-Path $repo "refresh.js"
-
     # Keep Node automation alive independently of Task Scheduler restart policy.
     # If refresh.js exits, restart it after 60 seconds.
     while ($true) {
