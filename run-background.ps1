@@ -125,7 +125,36 @@ try {
     # If refresh.js exits, restart it after 60 seconds.
     while ($true) {
         # Ensure only one managed refresh.js process exists.
-        Stop-NaukriAutomationNode
+        try {
+            $existingRefresh = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.ProcessId -ne $PID -and
+                    $_.Name -eq "node.exe" -and
+                    $_.CommandLine -and
+                    $_.CommandLine -like "*$refreshScript*"
+                })
+
+            foreach ($existing in $existingRefresh) {
+                try {
+                    & taskkill.exe /PID ([string]$existing.ProcessId) /T /F 2>$null | Out-Null
+                    Write-Host "Stopped stale refresh.js process tree rooted at PID $($existing.ProcessId)."
+                } catch {}
+            }
+
+            for ($attempt = 1; $attempt -le 10; $attempt++) {
+                $remaining = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.ProcessId -ne $PID -and
+                        $_.Name -eq "node.exe" -and
+                        $_.CommandLine -and
+                        $_.CommandLine -like "*$refreshScript*"
+                    })
+                if (-not $remaining) { break }
+                Start-Sleep -Milliseconds 500
+            }
+        } catch {
+            Write-Host "Could not clean stale refresh.js processes: $($_.Exception.Message)"
+        }
 
         # Clean the complete automation Chromium process tree and any stale
         # persistent-profile locks BEFORE launching refresh.js.
