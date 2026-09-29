@@ -20,6 +20,9 @@ const ALERT_COOLDOWN_MINUTES = Math.max(1, Number(process.env.ALERT_COOLDOWN_MIN
 const TELEGRAM_ENABLED = String(process.env.TELEGRAM_ENABLED || "false").toLowerCase() === "true";
 const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
 const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || "").trim();
+const LOG_MAX_BYTES = Math.max(1024 * 1024, Number(process.env.LOG_MAX_BYTES || 5 * 1024 * 1024));
+const INSTANCE_LOCK_PATH = path.resolve("naukri-refresh.lock");
+const HEALTH_PATH = path.resolve("naukri-refresh-health.json");
 const NAVIGATION_RETRIES = 3;
 const UPLOAD_RETRIES = 3;
 const RETRY_DELAY_MS = 5000;
@@ -155,10 +158,81 @@ const logDir = path.resolve("logs");
 
 fs.mkdirSync(logDir, { recursive: true });
 
+function rotateLogIfNeeded() {
+  const logPath = path.join(logDir, "naukri-refresh.log");
+  try {
+    if (fs.existsSync(logPath) && fs.statSync(logPath).size >= LOG_MAX_BYTES) {
+      const rotatedPath = logPath + ".1";
+      if (fs.existsSync(rotatedPath)) {
+        fs.unlinkSync(rotatedPath);
+      }
+      fs.renameSync(logPath, rotatedPath);
+    }
+  } catch {}
+}
+
 function log(message) {
   const line = "[" + new Date().toISOString() + "] " + message;
   console.log(line);
+  rotateLogIfNeeded();
   fs.appendFileSync(path.join(logDir, "naukri-refresh.log"), line + "\n");
+}
+
+function writeHealth(status, cycle, details = {}) {
+  try {
+    const payload = {
+      status,
+      cycle,
+      pid: process.pid,
+      interval_minutes: INTERVAL_MINUTES,
+      updated_at: new Date().toISOString(),
+      ...details
+    };
+    fs.writeFileSync(HEALTH_PATH, JSON.stringify(payload, null, 2) + "\n");
+  } catch (error) {
+    console.log("[health] Could not write health state: " + error.message);
+  }
+}
+
+function acquireInstanceLock() {
+  const payload = JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() });
+  try {
+    fs.writeFileSync(INSTANCE_LOCK_PATH, payload, { flag: "wx" });
+    return;
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+
+  try {
+    const existing = JSON.parse(fs.readFileSync(INSTANCE_LOCK_PATH, "utf8"));
+    const existingPid = Number(existing.pid);
+    if (existingPid && existingPid !== process.pid) {
+      try {
+        process.kill(existingPid, 0);
+        throw new Error("Another refresh.js instance is already running (PID " + existingPid + ").");
+      } catch (probeError) {
+        if (probeError && probeError.message && /another refresh\.js instance/i.test(probeError.message)) {
+          throw probeError;
+        }
+      }
+    }
+  } catch (error) {
+    if (error && /another refresh\.js instance/i.test(String(error.message || ""))) {
+      throw error;
+    }
+  }
+
+  fs.unlinkSync(INSTANCE_LOCK_PATH);
+  fs.writeFileSync(INSTANCE_LOCK_PATH, payload, { flag: "wx" });
+}
+
+function releaseInstanceLock() {
+  try {
+    const existing = JSON.parse(fs.readFileSync(INSTANCE_LOCK_PATH, "utf8"));
+    if (Number(existing.pid) === process.pid) {
+      fs.unlinkSync(INSTANCE_LOCK_PATH);
+    }
+  } catch {}
 }
 
 async function dismissPopups(page) {
@@ -458,7 +532,10 @@ async function recoverBrowserContext(currentContext) {
   let context;
 
   try {
+    acquireInstanceLock();
+    writeHealth("STARTING", 0);
     context = await launchBrowserContext();
+    writeHealth("RUNNING", 0, { next_cycle: 1 });
 
     let cycle = 0;
     let failures = 0;
@@ -474,6 +551,7 @@ async function recoverBrowserContext(currentContext) {
 
     while (true) {
       cycle++;
+      writeHealth("RUNNING", cycle, { phase: "starting_cycle" });
 
       try {
         // The long-running Chromium session can occasionally disappear after
@@ -514,6 +592,12 @@ async function recoverBrowserContext(currentContext) {
         }
 
         failures = 0;
+        writeHealth("SUCCESS", cycle, {
+          phase: "waiting",
+          last_success_at: new Date().toISOString(),
+          next_cycle: cycle + 1,
+          next_cycle_after_minutes: INTERVAL_MINUTES
+        });
         await sendTelegramSuccess(cycle);
       } catch (error) {
         const errorMessage = String(error && error.message || error);
@@ -528,6 +612,7 @@ async function recoverBrowserContext(currentContext) {
             context = await recoverBrowserContext(context);
             failures = 0;
             log("Cycle " + cycle + ": browser session recovered successfully.");
+            writeHealth("RECOVERED", cycle, { phase: "waiting", recovery_at: new Date().toISOString(), next_cycle: cycle + 1 });
             await sendTelegramRecovery(cycle);
           } catch (recoveryError) {
             failures++;
@@ -545,6 +630,7 @@ async function recoverBrowserContext(currentContext) {
         } else {
           failures++;
           log("Cycle " + cycle + " failed: " + errorMessage);
+          writeHealth("FAILED", cycle, { phase: "error", error: errorMessage });
           await sendFailureAlert(
             "Naukri Refresh - cycle " + cycle + " failed",
             errorMessage
@@ -563,17 +649,20 @@ async function recoverBrowserContext(currentContext) {
             failures + " consecutive failures. Last error: " + error.message,
             "Automation stopped after " + failures + " consecutive failures"
           );
+          writeHealth("STOPPED", cycle, { phase: "max_consecutive_failures", failures });
           await context.close().catch(() => {});
           process.exit(1);
         }
       }
 
+      writeHealth("WAITING", cycle, { phase: "waiting", next_cycle: cycle + 1, next_cycle_after_minutes: INTERVAL_MINUTES });
       log("Cycle " + cycle + ": waiting " + INTERVAL_MINUTES + " minutes");
       await new Promise(resolve =>
         setTimeout(resolve, INTERVAL_MINUTES * 60 * 1000)
       );
     }
   } catch (error) {
+    writeHealth("STARTUP_FAILED", 0, { phase: "startup", error: error.message });
     log("Startup failed: " + error.message);
     await sendFailureAlert(
       "Naukri Refresh - startup failure",
@@ -581,5 +670,7 @@ async function recoverBrowserContext(currentContext) {
     );
     await sendTelegramFailure(0, error.message, "Startup failed");
     process.exit(1);
+  } finally {
+    releaseInstanceLock();
   }
 })();
