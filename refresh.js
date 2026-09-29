@@ -17,6 +17,11 @@ const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").toLowerCase() ===
 const SMTP_USER = String(process.env.SMTP_USER || "").trim();
 const SMTP_PASS = String(process.env.SMTP_PASS || "");
 const ALERT_COOLDOWN_MINUTES = Math.max(1, Number(process.env.ALERT_COOLDOWN_MINUTES || 60));
+const WHATSAPP_ENABLED = String(process.env.WHATSAPP_ENABLED || "false").toLowerCase() === "true";
+const WHATSAPP_ACCESS_TOKEN = String(process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
+const WHATSAPP_PHONE_NUMBER_ID = String(process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
+const WHATSAPP_RECIPIENT_PHONE = String(process.env.WHATSAPP_RECIPIENT_PHONE || "").trim();
+const WHATSAPP_GRAPH_VERSION = String(process.env.WHATSAPP_GRAPH_VERSION || "v23.0").trim();
 const NAVIGATION_RETRIES = 3;
 const UPLOAD_RETRIES = 3;
 const RETRY_DELAY_MS = 5000;
@@ -24,6 +29,10 @@ let lastAlertAt = 0;
 
 const emailAlertsEnabled =
   Boolean(ALERT_EMAIL && SMTP_HOST && SMTP_USER && SMTP_PASS);
+
+const whatsappAlertsEnabled =
+  WHATSAPP_ENABLED &&
+  Boolean(WHATSAPP_ACCESS_TOKEN && WHATSAPP_PHONE_NUMBER_ID && WHATSAPP_RECIPIENT_PHONE);
 
 const mailer = emailAlertsEnabled
   ? nodemailer.createTransport({
@@ -65,6 +74,64 @@ async function sendFailureAlert(subject, errorMessage) {
     log("Failure alert email sent to " + ALERT_EMAIL);
   } catch (mailError) {
     log("Could not send failure alert email: " + mailError.message);
+  }
+}
+
+
+async function sendWhatsAppSuccess(cycle) {
+  if (!whatsappAlertsEnabled) {
+    return;
+  }
+
+  const message =
+    "✅ Naukri Refresh SUCCESS\\n" +
+    "Cycle: " + cycle + "\\n" +
+    "Resume upload: Completed successfully\\n" +
+    "Interval: " + INTERVAL_MINUTES + " minutes\\n" +
+    "Time: " +
+    new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+
+  try {
+    const response = await fetch(
+      "https://graph.facebook.com/" +
+        WHATSAPP_GRAPH_VERSION +
+        "/" +
+        WHATSAPP_PHONE_NUMBER_ID +
+        "/messages",
+      {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + WHATSAPP_ACCESS_TOKEN,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to: WHATSAPP_RECIPIENT_PHONE,
+          type: "text",
+          text: {
+            preview_url: false,
+            body: message
+          }
+        })
+      }
+    );
+
+    const responseText = await response.text();
+
+    if (!response.ok) {
+      throw new Error(
+        "WhatsApp API " +
+          response.status +
+          ": " +
+          responseText.slice(0, 1000)
+      );
+    }
+
+    log("WhatsApp success message sent for Cycle " + cycle + ".");
+  } catch (error) {
+    // WhatsApp notification must never stop or mark the Naukri refresh itself
+    // as failed. The refresh succeeded; only the notification failed.
+    log("Could not send WhatsApp success message: " + error.message);
   }
 }
 
@@ -432,6 +499,7 @@ async function recoverBrowserContext(currentContext) {
         }
 
         failures = 0;
+        await sendWhatsAppSuccess(cycle);
       } catch (error) {
         const errorMessage = String(error && error.message || error);
         const contextClosedError =
