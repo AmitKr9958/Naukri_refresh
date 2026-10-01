@@ -248,11 +248,12 @@ async function flushPendingTelegramNotifications() {
   log("Retrying " + queue.length + " queued Telegram notification(s).");
 
   const remaining = [];
-  for (const item of queue) {
+  for (let index = 0; index < queue.length; index++) {
+    const item = queue[index];
     const sent = await sendTelegramMessage(item.text, item.event_label + " (queued)", false);
     if (!sent) {
-      remaining.push(item);
-      // Preserve order and avoid hammering Telegram during an outage.
+      // Preserve the failed item and every notification after it.
+      remaining.push(...queue.slice(index));
       break;
     }
   }
