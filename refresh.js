@@ -36,6 +36,9 @@ const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
 const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || "").trim();
 const LOG_MAX_BYTES = readPositiveNumberEnv("LOG_MAX_BYTES", 5 * 1024 * 1024, 1024 * 1024, true);
 const NOTIFICATION_TIMEOUT_MS = readPositiveNumberEnv("NOTIFICATION_TIMEOUT_MS", 15000, 1000, true);
+const TELEGRAM_RETRIES = readPositiveNumberEnv("TELEGRAM_RETRIES", 3, 1, true);
+const TELEGRAM_RETRY_DELAY_MS = readPositiveNumberEnv("TELEGRAM_RETRY_DELAY_MS", 3000, 250, true);
+const TELEGRAM_QUEUE_PATH = path.resolve("telegram-notification-queue.json");
 const INSTANCE_LOCK_PATH = path.resolve("naukri-refresh.lock");
 const HEALTH_PATH = path.resolve("naukri-refresh-health.json");
 const NAVIGATION_RETRIES = 3;
@@ -97,7 +100,35 @@ async function sendFailureAlert(subject, errorMessage) {
 }
 
 
-async function sendTelegramMessage(text, eventLabel) {
+function queueTelegramNotification(text, eventLabel) {
+  if (!telegramAlertsEnabled) return;
+  try {
+    let queue = [];
+    if (fs.existsSync(TELEGRAM_QUEUE_PATH)) {
+      try {
+        queue = JSON.parse(fs.readFileSync(TELEGRAM_QUEUE_PATH, "utf8"));
+        if (!Array.isArray(queue)) queue = [];
+      } catch {
+        queue = [];
+      }
+    }
+
+    queue.push({
+      event_label: eventLabel,
+      text,
+      queued_at: new Date().toISOString()
+    });
+
+    // Keep the queue bounded so a prolonged Telegram outage cannot grow it forever.
+    const boundedQueue = queue.slice(-100);
+    fs.writeFileSync(TELEGRAM_QUEUE_PATH, JSON.stringify(boundedQueue, null, 2) + "\n");
+    log("Telegram " + eventLabel + " notification queued for retry.");
+  } catch (error) {
+    log("Could not persist Telegram " + eventLabel + " notification: " + error.message);
+  }
+}
+
+async function sendTelegramMessage(text, eventLabel, queueOnFailure = true) {
   if (!TELEGRAM_ENABLED) {
     log("Telegram " + eventLabel + " notification skipped: TELEGRAM_ENABLED is not true.");
     return false;
@@ -116,56 +147,126 @@ async function sendTelegramMessage(text, eventLabel) {
     return false;
   }
 
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= TELEGRAM_RETRIES; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), NOTIFICATION_TIMEOUT_MS);
+
+      let response;
+      try {
+        response = await fetch(
+          "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: TELEGRAM_CHAT_ID,
+              text,
+              disable_web_page_preview: true
+            }),
+            signal: controller.signal
+          }
+        );
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      const responseText = await response.text();
+
+      let responseJson = null;
+      try {
+        responseJson = JSON.parse(responseText);
+      } catch {}
+
+      if (!response.ok) {
+        throw new Error(
+          "Telegram API " + response.status + ": " + responseText.slice(0, 1000)
+        );
+      }
+
+      if (!responseJson || responseJson.ok !== true) {
+        throw new Error(
+          "Telegram API returned an unsuccessful response: " + responseText.slice(0, 1000)
+        );
+      }
+
+      log(
+        "Telegram " + eventLabel +
+        " message sent successfully (HTTP " + response.status +
+        ", attempt " + attempt + "/" + TELEGRAM_RETRIES + ")."
+      );
+      return true;
+    } catch (error) {
+      lastError = error;
+      const detail = error && error.name === "AbortError"
+        ? "request timed out after " + NOTIFICATION_TIMEOUT_MS + " ms"
+        : error.message;
+
+      log(
+        "Telegram " + eventLabel +
+        " attempt " + attempt + "/" + TELEGRAM_RETRIES +
+        " failed: " + detail
+      );
+
+      if (attempt < TELEGRAM_RETRIES) {
+        await new Promise(resolve =>
+          setTimeout(resolve, TELEGRAM_RETRY_DELAY_MS * attempt)
+        );
+      }
+    }
+  }
+
+  const finalDetail = lastError && lastError.name === "AbortError"
+    ? "request timed out after " + NOTIFICATION_TIMEOUT_MS + " ms"
+    : (lastError && lastError.message) || "unknown Telegram error";
+
+  log("Could not send Telegram " + eventLabel + " message after " + TELEGRAM_RETRIES + " attempts: " + finalDetail);
+
+  if (queueOnFailure) {
+    queueTelegramNotification(text, eventLabel);
+  }
+
+  return false;
+}
+
+async function flushPendingTelegramNotifications() {
+  if (!telegramAlertsEnabled || !fs.existsSync(TELEGRAM_QUEUE_PATH)) {
+    return;
+  }
+
+  let queue;
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), NOTIFICATION_TIMEOUT_MS);
-
-    let response;
-    try {
-      response = await fetch(
-        "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: TELEGRAM_CHAT_ID,
-            text,
-            disable_web_page_preview: true
-          }),
-          signal: controller.signal
-        }
-      );
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    const responseText = await response.text();
-
-    let responseJson = null;
-    try {
-      responseJson = JSON.parse(responseText);
-    } catch {}
-
-    if (!response.ok) {
-      throw new Error(
-        "Telegram API " + response.status + ": " + responseText.slice(0, 1000)
-      );
-    }
-
-    if (!responseJson || responseJson.ok !== true) {
-      throw new Error(
-        "Telegram API returned an unsuccessful response: " + responseText.slice(0, 1000)
-      );
-    }
-
-    log("Telegram " + eventLabel + " message sent successfully (HTTP " + response.status + ").");
-    return true;
+    queue = JSON.parse(fs.readFileSync(TELEGRAM_QUEUE_PATH, "utf8"));
+    if (!Array.isArray(queue) || queue.length === 0) return;
   } catch (error) {
-    const detail = error && error.name === "AbortError"
-      ? "request timed out after " + NOTIFICATION_TIMEOUT_MS + " ms"
-      : error.message;
-    log("Could not send Telegram " + eventLabel + " message: " + detail);
-    return false;
+    log("Could not read Telegram notification queue: " + error.message);
+    return;
+  }
+
+  log("Retrying " + queue.length + " queued Telegram notification(s).");
+
+  const remaining = [];
+  for (const item of queue) {
+    const sent = await sendTelegramMessage(item.text, item.event_label + " (queued)", false);
+    if (!sent) {
+      remaining.push(item);
+      // Preserve order and avoid hammering Telegram during an outage.
+      break;
+    }
+  }
+
+  try {
+    if (remaining.length > 0) {
+      fs.writeFileSync(TELEGRAM_QUEUE_PATH, JSON.stringify(remaining, null, 2) + "\n");
+      log(remaining.length + " Telegram notification(s) remain queued.");
+    } else {
+      fs.unlinkSync(TELEGRAM_QUEUE_PATH);
+      log("Telegram notification queue cleared.");
+    }
+  } catch (error) {
+    log("Could not update Telegram notification queue: " + error.message);
   }
 }
 
@@ -670,6 +771,7 @@ async function recoverBrowserContext(currentContext) {
     while (true) {
       cycle++;
       writeHealth("RUNNING", cycle, { phase: "starting_cycle" });
+      await flushPendingTelegramNotifications();
 
       try {
         // The long-running Chromium session can occasionally disappear after
