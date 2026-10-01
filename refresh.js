@@ -98,7 +98,21 @@ async function sendFailureAlert(subject, errorMessage) {
 
 
 async function sendTelegramMessage(text, eventLabel) {
+  if (!TELEGRAM_ENABLED) {
+    log("Telegram " + eventLabel + " notification skipped: TELEGRAM_ENABLED is not true.");
+    return false;
+  }
+
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    log(
+      "Telegram " + eventLabel +
+      " notification skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing."
+    );
+    return false;
+  }
+
   if (!telegramAlertsEnabled) {
+    log("Telegram " + eventLabel + " notification skipped: Telegram configuration is incomplete.");
     return false;
   }
 
@@ -127,16 +141,30 @@ async function sendTelegramMessage(text, eventLabel) {
 
     const responseText = await response.text();
 
+    let responseJson = null;
+    try {
+      responseJson = JSON.parse(responseText);
+    } catch {}
+
     if (!response.ok) {
       throw new Error(
         "Telegram API " + response.status + ": " + responseText.slice(0, 1000)
       );
     }
 
-    log("Telegram " + eventLabel + " message sent.");
+    if (!responseJson || responseJson.ok !== true) {
+      throw new Error(
+        "Telegram API returned an unsuccessful response: " + responseText.slice(0, 1000)
+      );
+    }
+
+    log("Telegram " + eventLabel + " message sent successfully (HTTP " + response.status + ").");
     return true;
   } catch (error) {
-    log("Could not send Telegram " + eventLabel + " message: " + error.message);
+    const detail = error && error.name === "AbortError"
+      ? "request timed out after " + NOTIFICATION_TIMEOUT_MS + " ms"
+      : error.message;
+    log("Could not send Telegram " + eventLabel + " message: " + detail);
     return false;
   }
 }
