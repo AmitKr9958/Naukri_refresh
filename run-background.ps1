@@ -174,57 +174,54 @@ function Stop-NaukriAutomationBrowsers {
 }
 
 function Clear-StaleNaukriProfileLock {
-    # Chromium can leave Singleton* lock artifacts after an unexpected crash.
-    # Only remove them after every managed refresh.js/Chromium process has been
-    # terminated. The launcher owns this entire automation profile.
     try {
         $activeProcesses = @(Get-NaukriAutomationProcesses)
-
-        if (-not $activeProcesses) {
-            foreach ($lockName in @("SingletonLock", "SingletonCookie", "SingletonSocket")) {
-                $lockPath = Join-Path $profileMarker $lockName
-                if (Test-Path -LiteralPath $lockPath) {
-                    Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
-                    Write-Host "Removed stale Chromium profile lock artifact: $lockName"
-                }
+        if ($activeProcesses) { Write-Host "Managed automation process still present; cleanup deferred."; return $false }
+        foreach ($lockName in @("SingletonLock", "SingletonCookie", "SingletonSocket")) {
+            $lockPath = Join-Path $profileMarker $lockName
+            if (Test-Path -LiteralPath $lockPath) {
+                try { Remove-Item -LiteralPath $lockPath -Force -ErrorAction Stop; Write-Host "Removed stale Chromium lock: $lockName" } catch { Write-Host "Could not remove Chromium lock: $lockName" }
             }
-
-            return
         }
-
-        Write-Host "Managed automation process still present; stale profile lock cleanup deferred."
-    } catch {
-        Write-Host "Could not clear stale Chromium profile locks: $($_.Exception.Message)"
-    }
+        return $true
+    } catch { Write-Host "Could not clear stale Chromium profile locks."; return $false }
 }
 
 function Reset-NaukriProfileLocks {
-    # Last-resort self-healing path. Run repeatedly until the exact managed
-    # process domain is gone, then remove stale Chromium lock artifacts.
-    for ($pass = 1; $pass -le 3; $pass++) {
+    for ($pass = 1; $pass -le 8; $pass++) {
+        Write-Host "Naukri profile cleanup pass $pass/8"
         Stop-NaukriAutomationBrowsers
-        $remaining = @(Get-NaukriAutomationProcesses)
-
-        if (-not $remaining) {
-            Clear-StaleNaukriProfileLock
-            $afterLockCleanup = @(Get-NaukriAutomationProcesses)
-            if (-not $afterLockCleanup) {
-                return
-            }
-        }
-
         Start-Sleep -Milliseconds 750
+        $remaining = @(Get-NaukriAutomationProcesses)
+        if ($remaining) { Start-Sleep -Seconds 1; continue }
+        if (Clear-StaleNaukriProfileLock) {
+            Start-Sleep -Milliseconds 500
+            $lockFilesRemain = @("SingletonLock", "SingletonCookie", "SingletonSocket") | Where-Object { Test-Path -LiteralPath (Join-Path $profileMarker $_) }
+            if (-not $lockFilesRemain) { Write-Host "Naukri Chromium profile is clean and unlocked."; return $true }
+        }
+        Start-Sleep -Seconds 1
     }
-
-    $remaining = @(Get-NaukriAutomationProcesses)
-    if ($remaining) {
-        $ids = ($remaining | ForEach-Object { $_.ProcessId }) -join ","
-        Write-Host "Warning: managed process(es) still remain after repeated reset attempts. PIDs: $ids"
-    } else {
-        Clear-StaleNaukriProfileLock
-    }
+    Write-Host "Naukri profile cleanup did not complete after 8 passes."
+    return $false
 }
 
+function Start-NaukriRefreshWithRecovery {
+    param([int]$MaxAttempts = 5)
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        Write-Host "Starting Naukri Refresh attempt $attempt/$MaxAttempts."
+        if (-not (Reset-NaukriProfileLocks)) { Start-Sleep -Seconds 5; continue }
+        try {
+            $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
+            Start-Sleep -Seconds 10
+            try { $nodeProcess.Refresh() } catch {}
+            if (-not $nodeProcess.HasExited) { Write-Host "Naukri Refresh started successfully."; return $nodeProcess }
+            Write-Host "Naukri Refresh exited during startup. Cleaning and retrying."
+            Reset-NaukriProfileLocks
+        } catch { Write-Host "Could not start Naukri Refresh. Retrying." }
+        Start-Sleep -Seconds 5
+    }
+    throw "Naukri Refresh could not be started after clean startup attempts."
+}
 function Hide-NaukriBrowserWindows {
     try {
         $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -297,7 +294,7 @@ try {
 
         Hide-NaukriBrowserWindows
         try {
-            $nodeProcess = Start-Process -FilePath $node -ArgumentList @('"' + $refreshScript + '"') -WorkingDirectory $repo -PassThru -WindowStyle Hidden
+            $nodeProcess = Start-NaukriRefreshWithRecovery -MaxAttempts 5
             while (-not $nodeProcess.HasExited) {
                 Hide-NaukriBrowserWindows
                 Start-Sleep -Milliseconds 750
@@ -305,17 +302,13 @@ try {
             }
             Hide-NaukriBrowserWindows
             $exitCode = $nodeProcess.ExitCode
-
-            # refresh.js can exit while headed Chromium survives as an orphan.
-            # Clean the complete process tree, then clear stale profile locks
-            # before the next restart.
             Reset-NaukriProfileLocks
-
-            Write-Host "Naukri Refresh exited with code $exitCode. Restarting in 60 seconds."
-            Start-Sleep -Seconds 60
+            Write-Host "Naukri Refresh exited. Restarting in 30 seconds."
+            Start-Sleep -Seconds 30
         } catch {
-            Write-Host "Could not start Naukri Refresh: $($_.Exception.Message)"
-            Start-Sleep -Seconds 60
+            Write-Host "Could not start Naukri Refresh cleanly. Retrying."
+            Reset-NaukriProfileLocks
+            Start-Sleep -Seconds 30
         }
     }
 }
