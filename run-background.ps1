@@ -29,6 +29,8 @@ public static class NaukriWindow {
 
 $profileMarker = [IO.Path]::GetFullPath((Join-Path $repo "naukri-browser-profile"))
 $profileMarker = $profileMarker.TrimEnd([IO.Path]::DirectorySeparatorChar)
+$profileMarkerNormalized = $profileMarker.Replace("/", "\").TrimEnd("\")
+$profileMarkerForward = $profileMarkerNormalized.Replace("\", "/")
 
 $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
 if ($nodeCommand) {
@@ -98,6 +100,31 @@ function Test-NaukriManagedProcess {
     return $false
 }
 
+function Test-NaukriProfileProcess {
+    param([object]$ProcessInfo)
+
+    if (-not $ProcessInfo -or -not $ProcessInfo.CommandLine) { return $false }
+
+    $commandLine = $ProcessInfo.CommandLine.Replace("/", "\")
+    $commandLineNormalized = $commandLine.ToLowerInvariant()
+
+    return (
+        $commandLineNormalized.IndexOf($profileMarkerNormalized.ToLowerInvariant(), [StringComparison]::Ordinal) -ge 0 -or
+        $commandLineNormalized.IndexOf($profileMarkerForward.ToLowerInvariant(), [StringComparison]::Ordinal) -ge 0 -or
+        $commandLineNormalized.IndexOf("--user-data-dir=$($profileMarkerNormalized.ToLowerInvariant())", [StringComparison]::Ordinal) -ge 0
+    )
+}
+
+function Get-NaukriProfileProcesses {
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    @(
+        $all | Where-Object {
+            $_.Name -match "^(chrome|msedge|chromium)(\.exe)?$" -and
+            (Test-NaukriProfileProcess $_)
+        }
+    )
+}
+
 function Get-NaukriAutomationProcesses {
     $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     $roots = @($all | Where-Object { Test-NaukriManagedProcess $_ })
@@ -115,19 +142,24 @@ function Get-NaukriAutomationProcesses {
         }
     }
 
+    foreach ($profileProcess in @(Get-NaukriProfileProcesses)) {
+        if ($result.ProcessId -notcontains $profileProcess.ProcessId) {
+            $result += $profileProcess
+        }
+    }
+
     $result
 }
 
 function Stop-NaukriAutomationBrowsers {
     # Chromium uses a process tree (browser + renderer/GPU/network/utility
-    # children). Kill only the automation domain, including descendants of
-    # the managed refresh.js process even when a Chromium child does not expose
-    # the profile path in its command line.
+    # children). The browser can survive its Node parent after a crash, so
+    # cleanup must also scan directly for Chromium processes using this exact
+    # Naukri user-data directory. Never target the user's normal Chrome profile.
     try {
-        for ($pass = 1; $pass -le 3; $pass++) {
-            $processes = @(Get-NaukriAutomationProcesses)
+        for ($pass = 1; $pass -le 4; $pass++) {
             $refreshRoots = @(
-                $processes |
+                Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                     Where-Object {
                         $_.Name -eq "node.exe" -and
                         $_.CommandLine -and
@@ -137,54 +169,69 @@ function Stop-NaukriAutomationBrowsers {
 
             foreach ($root in $refreshRoots) {
                 foreach ($child in @(Get-NaukriProcessTree -RootPid ([int]$root.ProcessId) | Sort-Object @{Expression={ $_.ProcessId }; Descending=$true})) {
-                    try {
-                        & taskkill.exe /PID ([string]$child.ProcessId) /T /F 2>$null | Out-Null
-                    } catch {}
+                    try { & taskkill.exe /PID ([string]$child.ProcessId) /T /F 2>$null | Out-Null } catch {}
                 }
-
                 try {
                     & taskkill.exe /PID ([string]$root.ProcessId) /T /F 2>$null | Out-Null
                     Write-Host "Stopped managed refresh.js process tree rooted at PID $($root.ProcessId)."
                 } catch {}
             }
 
-            foreach ($processInfo in @(Get-NaukriAutomationProcesses)) {
+            foreach ($profileProcess in @(Get-NaukriProfileProcesses)) {
                 try {
-                    & taskkill.exe /PID ([string]$processInfo.ProcessId) /T /F 2>$null | Out-Null
-                    Write-Host "Stopped remaining managed automation process tree rooted at PID $($processInfo.ProcessId)."
+                    & taskkill.exe /PID ([string]$profileProcess.ProcessId) /T /F 2>$null | Out-Null
+                    Write-Host "Stopped orphan Naukri Chromium process PID $($profileProcess.ProcessId)."
                 } catch {}
             }
 
-            for ($attempt = 1; $attempt -le 10; $attempt++) {
+            foreach ($processInfo in @(Get-NaukriAutomationProcesses)) {
+                try {
+                    & taskkill.exe /PID ([string]$processInfo.ProcessId) /T /F 2>$null | Out-Null
+                } catch {}
+            }
+
+            for ($attempt = 1; $attempt -le 12; $attempt++) {
                 $remaining = @(Get-NaukriAutomationProcesses)
-                if (-not $remaining) {
-                    return
-                }
+                if (-not $remaining) { return }
                 Start-Sleep -Milliseconds 500
             }
         }
 
         $remaining = @(Get-NaukriAutomationProcesses)
         if ($remaining) {
-            Write-Host "Warning: $($remaining.Count) managed automation process(es) still remain after cleanup."
+            Write-Host "Warning: $($remaining.Count) managed Naukri automation process(es) still remain after cleanup."
         }
     } catch {
-        Write-Host "Could not clean managed automation process tree: $($_.Exception.Message)"
+        Write-Host "Could not clean managed Naukri automation process tree: $($_.Exception.Message)"
     }
 }
 
 function Clear-StaleNaukriProfileLock {
     try {
         $activeProcesses = @(Get-NaukriAutomationProcesses)
-        if ($activeProcesses) { Write-Host "Managed automation process still present; cleanup deferred."; return $false }
+        if ($activeProcesses) {
+            Write-Host "Managed Naukri automation process still present; lock cleanup deferred."
+            return $false
+        }
+
         foreach ($lockName in @("SingletonLock", "SingletonCookie", "SingletonSocket")) {
             $lockPath = Join-Path $profileMarker $lockName
             if (Test-Path -LiteralPath $lockPath) {
-                try { Remove-Item -LiteralPath $lockPath -Force -ErrorAction Stop; Write-Host "Removed stale Chromium lock: $lockName" } catch { Write-Host "Could not remove Chromium lock: $lockName" }
+                try {
+                    Remove-Item -LiteralPath $lockPath -Force -Recurse -ErrorAction Stop
+                    Write-Host "Removed stale Chromium lock: $lockName"
+                } catch {
+                    Write-Host "Could not remove Chromium lock $lockName : $($_.Exception.Message)"
+                    return $false
+                }
             }
         }
+
         return $true
-    } catch { Write-Host "Could not clear stale Chromium profile locks."; return $false }
+    } catch {
+        Write-Host "Could not clear stale Chromium profile locks: $($_.Exception.Message)"
+        return $false
+    }
 }
 
 function Reset-NaukriProfileLocks {
