@@ -51,6 +51,7 @@ if ($nodeCommand) {
 }
 
 $refreshScript = Join-Path $repo "refresh.js"
+$healthPath = Join-Path $repo "naukri-refresh-health.json"
 
 function Get-NaukriProcessTree {
     param([int]$RootPid)
@@ -259,10 +260,48 @@ function Start-NaukriRefreshWithRecovery {
         if (-not (Reset-NaukriProfileLocks)) { Start-Sleep -Seconds 5; continue }
         try {
             $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
-            Start-Sleep -Seconds 10
-            try { $nodeProcess.Refresh() } catch {}
-            if (-not $nodeProcess.HasExited) { Write-Host "Naukri Refresh started successfully."; return $nodeProcess }
-            Write-Host "Naukri Refresh exited during startup. Cleaning and retrying."
+
+            # Do not consider Node "started" merely because the process exists.
+            # Playwright can launch Chromium and then remain stuck in
+            # launchPersistentContext while the saved profile is unhealthy.
+            # Require refresh.js to publish a non-STARTING health state first.
+            $startupHealthy = $false
+            for ($healthAttempt = 1; $healthAttempt -le 12; $healthAttempt++) {
+                Start-Sleep -Seconds 5
+                try { $nodeProcess.Refresh() } catch {}
+
+                if ($nodeProcess.HasExited) {
+                    Write-Host "Naukri Refresh exited during startup. Cleaning and retrying."
+                    break
+                }
+
+                try {
+                    if (Test-Path -LiteralPath $healthPath) {
+                        $health = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
+                        if ([int]$health.pid -eq [int]$nodeProcess.Id -and
+                            [string]$health.status -ne "STARTING") {
+                            Write-Host "Naukri Refresh startup health confirmed: $($health.status)."
+                            $startupHealthy = $true
+                            break
+                        }
+                    }
+                } catch {
+                    # Health file may be mid-write; retry on the next pass.
+                }
+
+                Write-Host "Waiting for refresh.js startup health ($healthAttempt/12)."
+            }
+
+            if ($startupHealthy -and -not $nodeProcess.HasExited) {
+                Write-Host "Naukri Refresh started successfully."
+                return $nodeProcess
+            }
+
+            Write-Host "Naukri Refresh did not reach healthy startup state. Terminating its process tree and cleaning the profile."
+            try {
+                & taskkill.exe /PID ([string]$nodeProcess.Id) /T /F 2>$null | Out-Null
+            } catch {}
+            Start-Sleep -Seconds 2
             Reset-NaukriProfileLocks
         } catch { Write-Host "Could not start Naukri Refresh. Retrying." }
         Start-Sleep -Seconds 5
