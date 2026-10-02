@@ -836,7 +836,15 @@ async function recoverBrowserContext(currentContext) {
             await sendTelegramFailure(
               cycle,
               recoveryError.message,
-              "Browser recovery failed"
+              "Browser recovery failed; automation will restart so the launcher can clean the Chromium profile."
+            );
+
+            // Do not continue with a null/locked BrowserContext. Exit so
+            // run-background.ps1 can clean the complete managed Chromium
+            // process tree, remove stale Singleton* locks, and restart cleanly.
+            throw new Error(
+              "Browser recovery failed; restarting automation for clean Chromium profile recovery: " +
+              recoveryError.message
             );
           }
         } else {
@@ -886,7 +894,9 @@ async function recoverBrowserContext(currentContext) {
                 ? errorMessage + " | Recovery failed: " + recoveryErrorMessage
                 : errorMessage,
               recovery_attempted: navigationFailure,
-              next_action: "Fresh browser context will be used on the next cycle"
+              next_action: recoveryErrorMessage
+                ? "Automation will restart so the launcher can clean the Chromium profile"
+                : "Fresh browser context will be used on the next cycle"
             });
 
             await sendFailureAlert(
@@ -901,6 +911,16 @@ async function recoverBrowserContext(currentContext) {
                 ? errorMessage + " | Browser recovery failed: " + recoveryErrorMessage
                 : errorMessage
             );
+
+            if (recoveryErrorMessage) {
+              // A locked profile is an infrastructure/process-state failure.
+              // Exit so the launcher can clean the managed Chromium tree and
+              // restart refresh.js with a clean profile lock state.
+              throw new Error(
+                "Browser session recreation failed; restarting automation for clean Chromium profile recovery: " +
+                recoveryErrorMessage
+              );
+            }
           }
         }
 
