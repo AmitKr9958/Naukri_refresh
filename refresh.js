@@ -742,6 +742,15 @@ async function recoverBrowserContext(currentContext) {
 }
 
 (async () => {
+  if (String(process.env.TELEGRAM_TEST_ONLY || "false").toLowerCase() === "true") {
+    const testMessage =
+      "🧪 Naukri Automation — TELEGRAM TEST\\n\\n" +
+      "This message was sent through the same Telegram notification function used by the background automation.\\n" +
+      "Time: " + new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+    const sent = await sendTelegramMessage(testMessage, "test", false);
+    process.exit(sent ? 0 : 1);
+  }
+
   if (!fs.existsSync(profileDir)) {
     throw new Error("No saved Naukri session. Run: npm run login");
   }
