@@ -22,8 +22,33 @@ Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class NaukriWindow {
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetWindowPos(
+        IntPtr hWnd,
+        IntPtr hWndInsertAfter,
+        int X,
+        int Y,
+        int cx,
+        int cy,
+        uint uFlags
+    );
+
+    public const int GWL_EXSTYLE = -20;
+    public const long WS_EX_TOOLWINDOW = 0x00000080L;
+    public const long WS_EX_APPWINDOW = 0x00040000L;
+    public const uint SWP_NOSIZE = 0x0001;
+    public const uint SWP_NOMOVE = 0x0002;
+    public const uint SWP_NOZORDER = 0x0004;
+    public const uint SWP_FRAMECHANGED = 0x0020;
 }
 "@
 
@@ -316,11 +341,42 @@ function Hide-NaukriBrowserWindows {
                 $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
                 $_.Name -match "^(chrome|msedge|chromium)(\.exe)?$"
             }
+
         foreach ($processInfo in $processes) {
             try {
                 $p = Get-Process -Id ([int]$processInfo.ProcessId) -ErrorAction SilentlyContinue
                 if ($p -and $p.MainWindowHandle -ne 0) {
-                    [NaukriWindow]::ShowWindowAsync([IntPtr]$p.MainWindowHandle, 0) | Out-Null
+                    $hWnd = [IntPtr]$p.MainWindowHandle
+
+                    # Remove the taskbar-app window style and apply TOOLWINDOW
+                    # only to Chromium using the dedicated Naukri profile.
+                    $stylePtr = [NaukriWindow]::GetWindowLongPtr(
+                        $hWnd,
+                        [NaukriWindow]::GWL_EXSTYLE
+                    )
+                    $style = $stylePtr.ToInt64()
+                    $newStyle = (($style -bor [NaukriWindow]::WS_EX_TOOLWINDOW) -band (-bnot [NaukriWindow]::WS_EX_APPWINDOW))
+
+                    [NaukriWindow]::SetWindowLongPtr(
+                        $hWnd,
+                        [NaukriWindow]::GWL_EXSTYLE,
+                        [IntPtr]$newStyle
+                    ) | Out-Null
+
+                    [NaukriWindow]::SetWindowPos(
+                        $hWnd,
+                        [IntPtr]::Zero,
+                        0,
+                        0,
+                        0,
+                        0,
+                        [NaukriWindow]::SWP_NOMOVE -bor
+                        [NaukriWindow]::SWP_NOSIZE -bor
+                        [NaukriWindow]::SWP_NOZORDER -bor
+                        [NaukriWindow]::SWP_FRAMECHANGED
+                    ) | Out-Null
+
+                    [NaukriWindow]::ShowWindowAsync($hWnd, 0) | Out-Null
                 }
             } catch {}
         }
