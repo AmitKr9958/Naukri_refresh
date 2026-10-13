@@ -22,6 +22,14 @@ Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class NaukriWindow {
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
 
@@ -32,23 +40,37 @@ public static class NaukriWindow {
     public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
     [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool SetWindowPos(
-        IntPtr hWnd,
-        IntPtr hWndInsertAfter,
-        int X,
-        int Y,
-        int cx,
-        int cy,
-        uint uFlags
-    );
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int X, int Y, int cx, int cy, uint flags);
 
     public const int GWL_EXSTYLE = -20;
     public const long WS_EX_TOOLWINDOW = 0x00000080L;
     public const long WS_EX_APPWINDOW = 0x00040000L;
+    public const int SW_HIDE = 0;
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
     public const uint SWP_NOZORDER = 0x0004;
     public const uint SWP_FRAMECHANGED = 0x0020;
+
+    // Enumerate top-level windows by PID; Get-Process.MainWindowHandle alone
+    // can miss Chromium's window during startup/recovery.
+    public static int HideWindowsForProcess(uint targetPid) {
+        int changed = 0;
+        EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+            uint ownerPid;
+            GetWindowThreadProcessId(hWnd, out ownerPid);
+            if (ownerPid != targetPid) return true;
+
+            long style = GetWindowLongPtr(hWnd, GWL_EXSTYLE).ToInt64();
+            long newStyle = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW;
+            SetWindowLongPtr(hWnd, GWL_EXSTYLE, new IntPtr(newStyle));
+            SetWindowPos(hWnd, IntPtr.Zero, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            ShowWindowAsync(hWnd, SW_HIDE);
+            changed++;
+            return true;
+        }, IntPtr.Zero);
+        return changed;
+    }
 }
 "@
 
@@ -344,43 +366,25 @@ function Hide-NaukriBrowserWindows {
 
         foreach ($processInfo in $processes) {
             try {
-                $p = Get-Process -Id ([int]$processInfo.ProcessId) -ErrorAction SilentlyContinue
-                if ($p -and $p.MainWindowHandle -ne 0) {
-                    $hWnd = [IntPtr]$p.MainWindowHandle
-
-                    # Remove the taskbar-app window style and apply TOOLWINDOW
-                    # only to Chromium using the dedicated Naukri profile.
-                    $stylePtr = [NaukriWindow]::GetWindowLongPtr(
-                        $hWnd,
-                        [NaukriWindow]::GWL_EXSTYLE
+                # Enumerate actual top-level windows for each dedicated-profile
+                # Chromium PID. Do not depend on MainWindowHandle being populated.
+                [void][NaukriWindow]::HideWindowsForProcess([uint32]$processInfo.ProcessId)
+            } catch {
+                try {
+                    Add-Content -LiteralPath (Join-Path $repo "logs\naukri-window-hide.log") -Value (
+                        "[" + (Get-Date -Format o) + "] PID " + $processInfo.ProcessId +
+                        " hide error: " + $_.Exception.Message
                     )
-                    $style = $stylePtr.ToInt64()
-                    $newStyle = (($style -bor [NaukriWindow]::WS_EX_TOOLWINDOW) -band (-bnot [NaukriWindow]::WS_EX_APPWINDOW))
-
-                    [NaukriWindow]::SetWindowLongPtr(
-                        $hWnd,
-                        [NaukriWindow]::GWL_EXSTYLE,
-                        [IntPtr]$newStyle
-                    ) | Out-Null
-
-                    [NaukriWindow]::SetWindowPos(
-                        $hWnd,
-                        [IntPtr]::Zero,
-                        0,
-                        0,
-                        0,
-                        0,
-                        [NaukriWindow]::SWP_NOMOVE -bor
-                        [NaukriWindow]::SWP_NOSIZE -bor
-                        [NaukriWindow]::SWP_NOZORDER -bor
-                        [NaukriWindow]::SWP_FRAMECHANGED
-                    ) | Out-Null
-
-                    [NaukriWindow]::ShowWindowAsync($hWnd, 0) | Out-Null
-                }
-            } catch {}
+                } catch {}
+            }
         }
-    } catch {}
+    } catch {
+        try {
+            Add-Content -LiteralPath (Join-Path $repo "logs\naukri-window-hide.log") -Value (
+                "[" + (Get-Date -Format o) + "] hide scan error: " + $_.Exception.Message
+            )
+        } catch {}
+    }
 }
 
 [NaukriPower]::SetThreadExecutionState(
