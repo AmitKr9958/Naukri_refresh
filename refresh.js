@@ -698,7 +698,7 @@ async function uploadResume(page, context) {
 async function launchBrowserContext() {
   // Bound browser startup so a hung Chromium spawn cannot leave health stuck
   // at STARTING forever. The launcher can then clean the managed profile and retry.
-  const launchTimeoutMs = readPositiveNumberEnv("BROWSER_LAUNCH_TIMEOUT_MS", 30000, 5000, true);
+  const launchTimeoutMs = readPositiveNumberEnv("BROWSER_LAUNCH_TIMEOUT_MS", 60000, 5000, true);
   log("Startup: launching Chromium (headless=" + HEADLESS + ", timeout=" + launchTimeoutMs + "ms).");
   try {
     return await chromium.launchPersistentContext(profileDir, {
@@ -719,7 +719,7 @@ async function launchBrowserContext() {
     const message = String(error && error.message || error);
 
     log("Startup: Chromium launch failed: " + message);
-    if (/existing browser session|profile is already in use|user-data-dir/i.test(message)) {
+    if (/existing browser session|profile is already in use|process singleton|user data directory is already in use|another browser process is using the profile/i.test(message)) {
       throw new Error(
         "The saved Naukri Chromium profile is currently locked by another process. " +
         "The background launcher will clean and retry automatically; no manual action is required."
