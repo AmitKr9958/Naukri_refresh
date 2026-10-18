@@ -26,19 +26,7 @@ function Write-LauncherLog {
 Write-LauncherLog ("Launcher started. PID=$PID; repo=$repo; Node=" + (Get-Command node.exe -ErrorAction SilentlyContinue).Source)
 Write-LauncherLog "Stage 1: direct file logging initialized."
 
-Write-LauncherLog "Stage 2: compiling NaukriPower native helper."
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class NaukriPower {
-    [DllImport("kernel32.dll")]
-    public static extern uint SetThreadExecutionState(uint esFlags);
-    public const uint ES_CONTINUOUS = 0x80000000;
-    public const uint ES_SYSTEM_REQUIRED = 0x00000001;
-}
-"@
-
-Write-LauncherLog "Stage 3: NaukriPower helper compiled; compiling window helper."
+Write-LauncherLog "Stage 2: skipping optional sleep-prevention helper; compiling window helper."
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -389,9 +377,7 @@ function Hide-NaukriBrowserWindows {
 }
 
 Write-LauncherLog "Stage 6: entering launcher main loop."
-[NaukriPower]::SetThreadExecutionState(
-    [NaukriPower]::ES_CONTINUOUS -bor [NaukriPower]::ES_SYSTEM_REQUIRED
-) | Out-Null
+Write-LauncherLog "Optional sleep-prevention helper skipped; continuing without changing Windows sleep settings."
 
 $exitCode = 1
 
