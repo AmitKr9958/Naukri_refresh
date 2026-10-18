@@ -7,6 +7,18 @@ $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $repo
 $env:HEADLESS = "false"
 
+# Task Scheduler hides this PowerShell window, so persist all startup/recovery
+# output to a daily log. This makes stuck recovery loops diagnosable.
+$launcherLogDir = Join-Path $repo "logs"
+New-Item -ItemType Directory -Path $launcherLogDir -Force | Out-Null
+$launcherLogPath = Join-Path $launcherLogDir ("run-background-" + (Get-Date -Format "yyyy-MM-dd") + ".log")
+try {
+    Start-Transcript -Path $launcherLogPath -Append -Force | Out-Null
+    Write-Host ("[" + (Get-Date -Format o) + "] Naukri background launcher started. PID=$PID; repo=$repo; Node=" + (Get-Command node.exe -ErrorAction SilentlyContinue).Source)
+} catch {
+    # Keep the launcher functional if transcript logging is unavailable.
+}
+
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -350,7 +362,7 @@ function Start-NaukriRefreshWithRecovery {
             } catch {}
             Start-Sleep -Seconds 2
             Reset-NaukriProfileLocks
-        } catch { Write-Host "Could not start Naukri Refresh. Retrying." }
+        } catch { Write-Host ("Could not start Naukri Refresh. Retrying. Error: " + $_.Exception.Message) }
         Start-Sleep -Seconds 5
     }
     throw "Naukri Refresh could not be started after clean startup attempts."
@@ -452,7 +464,7 @@ try {
             Write-Host "Naukri Refresh exited. Restarting in 30 seconds."
             Start-Sleep -Seconds 30
         } catch {
-            Write-Host "Could not start Naukri Refresh cleanly. Retrying."
+            Write-Host ("Could not start Naukri Refresh cleanly. Retrying. Error: " + $_.Exception.Message)
             Reset-NaukriProfileLocks
             Start-Sleep -Seconds 30
         }
@@ -460,6 +472,7 @@ try {
 }
 finally {
     [NaukriPower]::SetThreadExecutionState([NaukriPower]::ES_CONTINUOUS) | Out-Null
+    try { Stop-Transcript | Out-Null } catch {}
 }
 
 exit $exitCode
