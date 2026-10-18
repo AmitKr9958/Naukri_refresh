@@ -19,6 +19,16 @@ try {
     # Keep the launcher functional if transcript logging is unavailable.
 }
 
+# Write directly to disk as well as the transcript so startup stalls remain diagnosable.
+function Write-LauncherLog {
+    param([string]$Message)
+    try {
+        Add-Content -LiteralPath $launcherLogPath -Value ("[" + (Get-Date -Format o) + "] " + $Message) -ErrorAction Stop
+    } catch {}
+}
+Write-LauncherLog "Stage 1: transcript initialized."
+
+Write-LauncherLog "Stage 2: compiling NaukriPower native helper."
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -30,6 +40,7 @@ public static class NaukriPower {
 }
 "@
 
+Write-LauncherLog "Stage 3: NaukriPower helper compiled; compiling window helper."
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -86,6 +97,7 @@ public static class NaukriWindow {
 }
 "@
 
+Write-LauncherLog "Stage 4: native helpers compiled; resolving profile and Node paths."
 $profileMarker = [IO.Path]::GetFullPath((Join-Path $repo "naukri-browser-profile"))
 $profileMarker = $profileMarker.TrimEnd([IO.Path]::DirectorySeparatorChar)
 $profileMarkerNormalized = $profileMarker.Replace("/", "\").TrimEnd("\")
@@ -109,6 +121,7 @@ if ($nodeCommand) {
     }
 }
 
+Write-LauncherLog ("Stage 5: Node resolved to " + $node)
 $refreshScript = Join-Path $repo "refresh.js"
 $healthPath = Join-Path $repo "naukri-refresh-health.json"
 
@@ -399,6 +412,7 @@ function Hide-NaukriBrowserWindows {
     }
 }
 
+Write-LauncherLog "Stage 6: entering launcher main loop."
 [NaukriPower]::SetThreadExecutionState(
     [NaukriPower]::ES_CONTINUOUS -bor [NaukriPower]::ES_SYSTEM_REQUIRED
 ) | Out-Null
@@ -409,10 +423,12 @@ try {
     # Keep Node automation alive independently of Task Scheduler restart policy.
     # If refresh.js exits, restart it after 60 seconds.
     while ($true) {
+        Write-LauncherLog "Main loop: beginning process/profile cleanup."
         # Ensure only one managed refresh.js process exists and reset the
         # complete automation domain before every launch.
         try {
             Reset-NaukriProfileLocks
+            Write-LauncherLog "Main loop: initial profile cleanup returned."
 
             $existingRefresh = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                 Where-Object {
@@ -446,12 +462,15 @@ try {
             # A stale Node process can be outside the profile-marker query, so
             # perform the profile reset once more after the Node guard.
             Reset-NaukriProfileLocks
+            Write-LauncherLog "Main loop: profile cleanup complete."
         } catch {
+            Write-LauncherLog ("Main loop cleanup exception: " + $_.Exception.Message)
             Write-Host "Could not clean stale refresh.js processes: $($_.Exception.Message)"
         }
 
         Hide-NaukriBrowserWindows
         try {
+            Write-LauncherLog "Main loop: starting refresh.js recovery routine."
             $nodeProcess = Start-NaukriRefreshWithRecovery -MaxAttempts 5
             while (-not $nodeProcess.HasExited) {
                 Hide-NaukriBrowserWindows
@@ -464,6 +483,7 @@ try {
             Write-Host "Naukri Refresh exited. Restarting in 30 seconds."
             Start-Sleep -Seconds 30
         } catch {
+            Write-LauncherLog ("Refresh start exception: " + $_.Exception.ToString())
             Write-Host ("Could not start Naukri Refresh cleanly. Retrying. Error: " + $_.Exception.Message)
             Reset-NaukriProfileLocks
             Start-Sleep -Seconds 30
