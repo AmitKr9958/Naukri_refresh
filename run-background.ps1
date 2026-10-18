@@ -26,64 +26,9 @@ function Write-LauncherLog {
 Write-LauncherLog ("Launcher started. PID=$PID; repo=$repo; Node=" + (Get-Command node.exe -ErrorAction SilentlyContinue).Source)
 Write-LauncherLog "Stage 1: direct file logging initialized."
 
-Write-LauncherLog "Stage 2: skipping optional sleep-prevention helper; compiling window helper."
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class NaukriWindow {
-    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+Write-LauncherLog "Stage 2: skipping optional native window-helper compilation; Chromium is configured to start minimized and off-screen."
 
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
-    public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
-
-    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
-    public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int X, int Y, int cx, int cy, uint flags);
-
-    public const int GWL_EXSTYLE = -20;
-    public const long WS_EX_TOOLWINDOW = 0x00000080L;
-    public const long WS_EX_APPWINDOW = 0x00040000L;
-    public const int SW_HIDE = 0;
-    public const uint SWP_NOSIZE = 0x0001;
-    public const uint SWP_NOMOVE = 0x0002;
-    public const uint SWP_NOZORDER = 0x0004;
-    public const uint SWP_FRAMECHANGED = 0x0020;
-
-    // Enumerate top-level windows by PID; Get-Process.MainWindowHandle alone
-    // can miss Chromium's window during startup/recovery.
-    public static int HideWindowsForProcess(uint targetPid) {
-        int changed = 0;
-        EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
-            uint ownerPid;
-            GetWindowThreadProcessId(hWnd, out ownerPid);
-            if (ownerPid != targetPid) return true;
-
-            long style = GetWindowLongPtr(hWnd, GWL_EXSTYLE).ToInt64();
-            long newStyle = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW;
-            SetWindowLongPtr(hWnd, GWL_EXSTYLE, new IntPtr(newStyle));
-            SetWindowPos(hWnd, IntPtr.Zero, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
-            ShowWindowAsync(hWnd, SW_HIDE);
-            changed++;
-            return true;
-        }, IntPtr.Zero);
-        return changed;
-    }
-}
-"@
-
-Write-LauncherLog "Stage 4: native helpers compiled; resolving profile and Node paths."
+Write-LauncherLog "Stage 4: resolving profile and Node paths."
 $profileMarker = [IO.Path]::GetFullPath((Join-Path $repo "naukri-browser-profile"))
 $profileMarker = $profileMarker.TrimEnd([IO.Path]::DirectorySeparatorChar)
 $profileMarkerNormalized = $profileMarker.Replace("/", "\").TrimEnd("\")
@@ -345,35 +290,9 @@ function Start-NaukriRefreshWithRecovery {
     throw "Naukri Refresh could not be started after clean startup attempts."
 }
 function Hide-NaukriBrowserWindows {
-    try {
-        $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.CommandLine -and
-                $_.CommandLine.IndexOf($profileMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $_.Name -match "^(chrome|msedge|chromium)(\.exe)?$"
-            }
-
-        foreach ($processInfo in $processes) {
-            try {
-                # Enumerate actual top-level windows for each dedicated-profile
-                # Chromium PID. Do not depend on MainWindowHandle being populated.
-                [void][NaukriWindow]::HideWindowsForProcess([uint32]$processInfo.ProcessId)
-            } catch {
-                try {
-                    Add-Content -LiteralPath (Join-Path $repo "logs\naukri-window-hide.log") -Value (
-                        "[" + (Get-Date -Format o) + "] PID " + $processInfo.ProcessId +
-                        " hide error: " + $_.Exception.Message
-                    )
-                } catch {}
-            }
-        }
-    } catch {
-        try {
-            Add-Content -LiteralPath (Join-Path $repo "logs\naukri-window-hide.log") -Value (
-                "[" + (Get-Date -Format o) + "] hide scan error: " + $_.Exception.Message
-            )
-        } catch {}
-    }
+    # Chromium is launched minimized and off-screen. Avoid runtime C#/Win32
+    # compilation here because Add-Type was stalling Task Scheduler startup.
+    return
 }
 
 Write-LauncherLog "Stage 6: entering launcher main loop."
