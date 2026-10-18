@@ -453,7 +453,7 @@ try {
     }
 }
 finally {
-    [NaukriPower]::SetThreadExecutionState([NaukriPower]::ES_CONTINUOUS) | Out-Null
+    Write-LauncherLog "Launcher exiting; no system sleep-state override was applied."
 }
 
 exit $exitCode
