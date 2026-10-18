@@ -11,22 +11,20 @@ $env:HEADLESS = "false"
 # output to a daily log. This makes stuck recovery loops diagnosable.
 $launcherLogDir = Join-Path $repo "logs"
 New-Item -ItemType Directory -Path $launcherLogDir -Force | Out-Null
-$launcherLogPath = Join-Path $launcherLogDir ("run-background-" + (Get-Date -Format "yyyy-MM-dd") + ".log")
-try {
-    Start-Transcript -Path $launcherLogPath -Append -Force | Out-Null
-    Write-Host ("[" + (Get-Date -Format o) + "] Naukri background launcher started. PID=$PID; repo=$repo; Node=" + (Get-Command node.exe -ErrorAction SilentlyContinue).Source)
-} catch {
-    # Keep the launcher functional if transcript logging is unavailable.
-}
+# Use a per-process log and do not use Start-Transcript: transcript keeps the
+# file open and conflicts with Add-Content when the launcher runs hidden.
+$launcherLogPath = Join-Path $launcherLogDir ("run-background-" + (Get-Date -Format "yyyy-MM-dd") + "-" + $PID + ".log")
 
-# Write directly to disk as well as the transcript so startup stalls remain diagnosable.
 function Write-LauncherLog {
     param([string]$Message)
     try {
         Add-Content -LiteralPath $launcherLogPath -Value ("[" + (Get-Date -Format o) + "] " + $Message) -ErrorAction Stop
-    } catch {}
+    } catch {
+        # Diagnostics must never prevent the automation from starting.
+    }
 }
-Write-LauncherLog "Stage 1: transcript initialized."
+Write-LauncherLog ("Launcher started. PID=$PID; repo=$repo; Node=" + (Get-Command node.exe -ErrorAction SilentlyContinue).Source)
+Write-LauncherLog "Stage 1: direct file logging initialized."
 
 Write-LauncherLog "Stage 2: compiling NaukriPower native helper."
 Add-Type @"
@@ -470,7 +468,6 @@ try {
 }
 finally {
     [NaukriPower]::SetThreadExecutionState([NaukriPower]::ES_CONTINUOUS) | Out-Null
-    try { Stop-Transcript | Out-Null } catch {}
 }
 
 exit $exitCode
