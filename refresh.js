@@ -698,10 +698,47 @@ async function uploadResume(page, context) {
 async function launchBrowserContext() {
   // Bound browser startup so a hung Chromium spawn cannot leave health stuck
   // at STARTING forever. The launcher can then clean the managed profile and retry.
-  const launchTimeoutMs = readPositiveNumberEnv("BROWSER_LAUNCH_TIMEOUT_MS", 60000, 5000, true);
-  log("Startup: launching Chromium (headless=" + HEADLESS + ", timeout=" + launchTimeoutMs + "ms).");
+  // Root-cause hardening (Oct 2026):
+  // - Explicit executablePath so Playwright and the launched binary stay aligned.
+  // - Safer Chromium args that avoid first-run, default-browser, and recent
+  //   DevTools-debugging restrictions that can leave the process alive while
+  //   launchPersistentContext never returns.
+  // - Off-screen / minimized flags remain, but are no longer the only args.
+  // - Clear distinction between true profile locks and generic launch timeouts.
+  const launchTimeoutMs = readPositiveNumberEnv("BROWSER_LAUNCH_TIMEOUT_MS", 90000, 5000, true);
+  let executablePath = null;
   try {
-    return await chromium.launchPersistentContext(profileDir, {
+    executablePath = chromium.executablePath();
+  } catch (e) {
+    log("Startup: could not resolve chromium.executablePath(): " + (e && e.message || e));
+  }
+
+  const launchArgs = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-features=DevToolsDebuggingRestrictions",
+    "--start-minimized",
+    "--window-position=-32000,-32000"
+  ];
+
+  log(
+    "Startup: launching Chromium (headless=" +
+      HEADLESS +
+      ", timeout=" +
+      launchTimeoutMs +
+      "ms, executablePath=" +
+      (executablePath || "default") +
+      ")."
+  );
+  writeHealth("STARTING", 0, {
+    phase: "launching_browser",
+    launch_timeout_ms: launchTimeoutMs,
+    executable_path: executablePath || "default"
+  });
+
+  try {
+    const options = {
       headless: HEADLESS,
       timeout: launchTimeoutMs,
       viewport: { width: 1440, height: 900 },
@@ -709,20 +746,42 @@ async function launchBrowserContext() {
       // active, but start its window off-screen so no Chromium window is visible
       // during normal background operation. File uploads are handled by
       // Playwright's filechooser API, so no native file-picker window is needed.
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        "--start-minimized",
-        "--window-position=-32000,-32000"
-      ]
-    });
+      args: launchArgs
+    };
+    if (executablePath) {
+      options.executablePath = executablePath;
+    }
+
+    return await chromium.launchPersistentContext(profileDir, options);
   } catch (error) {
     const message = String(error && error.message || error);
 
     log("Startup: Chromium launch failed: " + message);
-    if (/existing browser session|profile is already in use|process singleton|user data directory is already in use|another browser process is using the profile/i.test(message)) {
+
+    // True profile-lock phrases only. Generic timeouts often mention the
+    // user-data-dir path in Playwright's call log and must not be misclassified.
+    const isProfileLock =
+      /existing browser session|profile is already in use|process singleton|user data directory is already in use|another browser process is using the profile|SingletonLock/i.test(
+        message
+      ) && !/Timeout\s+\d+ms\s+exceeded/i.test(message);
+
+    if (isProfileLock) {
       throw new Error(
         "The saved Naukri Chromium profile is currently locked by another process. " +
-        "The background launcher will clean and retry automatically; no manual action is required."
+          "The background launcher will clean and retry automatically; no manual action is required."
+      );
+    }
+
+    if (/Timeout\s+\d+ms\s+exceeded/i.test(message)) {
+      throw new Error(
+        "Chromium process started but Playwright could not complete launchPersistentContext " +
+          "within " +
+          launchTimeoutMs +
+          "ms (CDP/handshake hang or slow profile load). " +
+          "This is not classified as a profile lock. " +
+          "Check antivirus interference, profile size/corruption, and that the scheduled-task " +
+          "user session is interactive. Original: " +
+          message
       );
     }
 

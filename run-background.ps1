@@ -246,8 +246,10 @@ function Start-NaukriRefreshWithRecovery {
             # Playwright can launch Chromium and then remain stuck in
             # launchPersistentContext while the saved profile is unhealthy.
             # Require refresh.js to publish a non-STARTING health state first.
+            # Wait up to ~120s to cover BROWSER_LAUNCH_TIMEOUT_MS (default 90s) + margin.
             $startupHealthy = $false
-            for ($healthAttempt = 1; $healthAttempt -le 12; $healthAttempt++) {
+            $maxHealthAttempts = 24
+            for ($healthAttempt = 1; $healthAttempt -le $maxHealthAttempts; $healthAttempt++) {
                 Start-Sleep -Seconds 5
                 try { $nodeProcess.Refresh() } catch {}
 
@@ -270,7 +272,7 @@ function Start-NaukriRefreshWithRecovery {
                     # Health file may be mid-write; retry on the next pass.
                 }
 
-                Write-Host "Waiting for refresh.js startup health ($healthAttempt/12)."
+                Write-Host "Waiting for refresh.js startup health ($healthAttempt/$maxHealthAttempts)."
             }
 
             if ($startupHealthy -and -not $nodeProcess.HasExited) {
