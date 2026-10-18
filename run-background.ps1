@@ -225,57 +225,35 @@ function Get-NaukriAutomationProcesses {
 }
 
 function Stop-NaukriAutomationBrowsers {
-    # Chromium uses a process tree (browser + renderer/GPU/network/utility
-    # children). The browser can survive its Node parent after a crash, so
-    # cleanup must also scan directly for Chromium processes using this exact
-    # Naukri user-data directory. Never target the user's normal Chrome profile.
+    # Use one process snapshot per cleanup pass. The previous implementation
+    # repeatedly walked every process tree and could stall before Node started.
     try {
-        for ($pass = 1; $pass -le 4; $pass++) {
-            $refreshRoots = @(
-                Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-                    Where-Object {
-                        $_.Name -eq "node.exe" -and
-                        $_.CommandLine -and
-                        $_.CommandLine.IndexOf($refreshScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
-                    }
+        $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+        $targets = @($all | Where-Object {
+            (
+                $_.Name -eq "node.exe" -and
+                $_.CommandLine -and
+                $_.CommandLine.IndexOf($refreshScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            ) -or (
+                $_.Name -match "^(chrome|msedge|chromium)(\.exe)?$" -and
+                (Test-NaukriProfileProcess $_)
             )
+        })
 
-            foreach ($root in $refreshRoots) {
-                foreach ($child in @(Get-NaukriProcessTree -RootPid ([int]$root.ProcessId) | Sort-Object @{Expression={ $_.ProcessId }; Descending=$true})) {
-                    try { & taskkill.exe /PID ([string]$child.ProcessId) /T /F 2>$null | Out-Null } catch {}
-                }
-                try {
-                    & taskkill.exe /PID ([string]$root.ProcessId) /T /F 2>$null | Out-Null
-                    Write-Host "Stopped managed refresh.js process tree rooted at PID $($root.ProcessId)."
-                } catch {}
-            }
-
-            foreach ($profileProcess in @(Get-NaukriProfileProcesses)) {
-                try {
-                    & taskkill.exe /PID ([string]$profileProcess.ProcessId) /T /F 2>$null | Out-Null
-                    Write-Host "Stopped orphan Naukri Chromium process PID $($profileProcess.ProcessId)."
-                } catch {}
-            }
-
-            foreach ($processInfo in @(Get-NaukriAutomationProcesses)) {
-                try {
-                    & taskkill.exe /PID ([string]$processInfo.ProcessId) /T /F 2>$null | Out-Null
-                } catch {}
-            }
-
-            for ($attempt = 1; $attempt -le 12; $attempt++) {
-                $remaining = @(Get-NaukriAutomationProcesses)
-                if (-not $remaining) { return }
-                Start-Sleep -Milliseconds 500
+        foreach ($target in $targets) {
+            try {
+                Write-Host "Stopping managed Naukri process PID $($target.ProcessId) ($($target.Name))."
+                & taskkill.exe /PID ([string]$target.ProcessId) /T /F 2>$null | Out-Null
+            } catch {
+                Write-Host "Could not stop managed PID $($target.ProcessId): $($_.Exception.Message)"
             }
         }
 
-        $remaining = @(Get-NaukriAutomationProcesses)
-        if ($remaining) {
-            Write-Host "Warning: $($remaining.Count) managed Naukri automation process(es) still remain after cleanup."
+        if ($targets.Count -gt 0) {
+            Start-Sleep -Milliseconds 750
         }
     } catch {
-        Write-Host "Could not clean managed Naukri automation process tree: $($_.Exception.Message)"
+        Write-Host "Could not scan managed Naukri processes: $($_.Exception.Message)"
     }
 }
 
