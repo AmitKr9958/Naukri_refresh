@@ -713,6 +713,7 @@ async function launchBrowserContext() {
   } catch (error) {
     const message = String(error && error.message || error);
 
+    log("Startup: Chromium launch failed: " + message);
     if (/existing browser session|profile is already in use|user-data-dir/i.test(message)) {
       throw new Error(
         "The saved Naukri Chromium profile is currently locked by another process. " +
@@ -759,9 +760,11 @@ async function recoverBrowserContext(currentContext) {
 
   try {
     acquireInstanceLock();
-    writeHealth("STARTING", 0);
+    writeHealth("STARTING", 0, { phase: "launching_browser" });
+    log("Startup: launching persistent Chromium with the saved Naukri profile.");
     context = await launchBrowserContext();
-    writeHealth("RUNNING", 0, { next_cycle: 1 });
+    log("Startup: persistent Chromium launched successfully.");
+    writeHealth("RUNNING", 0, { phase: "browser_ready", next_cycle: 1 });
 
     let cycle = 0;
     let failures = 0;
