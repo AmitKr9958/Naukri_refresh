@@ -696,9 +696,14 @@ async function uploadResume(page, context) {
 }
 
 async function launchBrowserContext() {
+  // Bound browser startup so a hung Chromium spawn cannot leave health stuck
+  // at STARTING forever. The launcher can then clean the managed profile and retry.
+  const launchTimeoutMs = readPositiveNumberEnv("BROWSER_LAUNCH_TIMEOUT_MS", 30000, 5000, true);
+  log("Startup: launching Chromium (headless=" + HEADLESS + ", timeout=" + launchTimeoutMs + "ms).");
   try {
     return await chromium.launchPersistentContext(profileDir, {
       headless: HEADLESS,
+      timeout: launchTimeoutMs,
       viewport: { width: 1440, height: 900 },
       // Naukri currently requires headed Chromium. Keep the real browser engine
       // active, but start its window off-screen so no Chromium window is visible
