@@ -5,6 +5,11 @@
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $repo
+
+# Naukri profile/resume controls are not reliably available in headless Chromium.
+# Force headed mode for the automation process. The window is still started
+# minimized and off-screen by refresh.js args; the Task Scheduler PowerShell
+# window remains hidden. Do not let .env HEADLESS=true override this.
 $env:HEADLESS = "false"
 
 # Task Scheduler hides this PowerShell window, so persist all startup/recovery
@@ -25,6 +30,7 @@ function Write-LauncherLog {
 }
 Write-LauncherLog ("Launcher started. PID=$PID; repo=$repo; Node=" + (Get-Command node.exe -ErrorAction SilentlyContinue).Source)
 Write-LauncherLog "Stage 1: direct file logging initialized."
+Write-LauncherLog "Stage 1b: HEADLESS forced to false (Naukri UI requires headed Chromium; window is minimized/off-screen)."
 
 Write-LauncherLog "Stage 2: skipping optional native window-helper compilation; Chromium is configured to start minimized and off-screen."
 

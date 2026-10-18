@@ -22,8 +22,19 @@ const PROFILE_URL = process.env.PROFILE_URL || "https://www.naukri.com/mnjuser/p
 const RESUME_PATH = path.resolve(process.env.RESUME_PATH || "");
 const INTERVAL_MINUTES = readPositiveNumberEnv("REFRESH_INTERVAL_MINUTES", 20, 1, true);
 const MAX_FAILURES = readPositiveNumberEnv("MAX_CONSECUTIVE_FAILURES", 3, 1, true);
+// Naukri profile/resume controls are not reliably visible under headless Chromium.
+// Prefer headed mode. run-background.ps1 forces HEADLESS=false for the scheduled task.
 const HEADLESS = String(process.env.HEADLESS || "false").toLowerCase() === "true";
 const DEBUG_PROFILE_UI = String(process.env.DEBUG_PROFILE_UI || "false").toLowerCase() === "true";
+if (HEADLESS) {
+  // Emitted once at process load so logs clearly explain missing UI controls.
+  console.log(
+    "[" +
+      new Date().toISOString() +
+      "] WARNING: HEADLESS=true. Naukri resume/profile update controls often fail in headless mode. " +
+      "Use HEADLESS=false (run-background.ps1 forces this for the scheduled task)."
+  );
+}
 const ALERT_EMAIL = String(process.env.ALERT_EMAIL || "").trim();
 const SMTP_HOST = String(process.env.SMTP_HOST || "").trim();
 const SMTP_PORT = readPositiveNumberEnv("SMTP_PORT", 587, 1, true);
@@ -103,15 +114,7 @@ async function sendFailureAlert(subject, errorMessage) {
 function queueTelegramNotification(text, eventLabel) {
   if (!telegramAlertsEnabled) return;
   try {
-    let queue = [];
-    if (fs.existsSync(TELEGRAM_QUEUE_PATH)) {
-      try {
-        queue = JSON.parse(fs.readFileSync(TELEGRAM_QUEUE_PATH, "utf8"));
-        if (!Array.isArray(queue)) queue = [];
-      } catch {
-        queue = [];
-      }
-    }
+    const queue = readTelegramQueue();
 
     queue.push({
       event_label: eventLabel,
@@ -231,17 +234,38 @@ async function sendTelegramMessage(text, eventLabel, queueOnFailure = true) {
   return false;
 }
 
+function readTelegramQueue() {
+  if (!fs.existsSync(TELEGRAM_QUEUE_PATH)) {
+    return [];
+  }
+
+  try {
+    const raw = fs.readFileSync(TELEGRAM_QUEUE_PATH, "utf8");
+    if (!raw || !String(raw).trim()) {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    log(
+      "Telegram notification queue is corrupt or unreadable (" +
+        error.message +
+        "); resetting queue file."
+    );
+    try {
+      fs.unlinkSync(TELEGRAM_QUEUE_PATH);
+    } catch {}
+    return [];
+  }
+}
+
 async function flushPendingTelegramNotifications() {
   if (!telegramAlertsEnabled || !fs.existsSync(TELEGRAM_QUEUE_PATH)) {
     return;
   }
 
-  let queue;
-  try {
-    queue = JSON.parse(fs.readFileSync(TELEGRAM_QUEUE_PATH, "utf8"));
-    if (!Array.isArray(queue) || queue.length === 0) return;
-  } catch (error) {
-    log("Could not read Telegram notification queue: " + error.message);
+  const queue = readTelegramQueue();
+  if (!queue.length) {
     return;
   }
 
