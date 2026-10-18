@@ -53,7 +53,7 @@ Uninstall:
 ### Important
 
 - The PowerShell/terminal window is hidden.
-- Chromium is headed internally for compatibility, but the background launcher hides the automation window from the desktop/taskbar.
+- Chromium is headed internally for compatibility and launched minimized/off-screen; Windows may still show its taskbar entry depending on system behavior.
 - The launcher does not prevent Windows from entering idle sleep. Configure Windows power settings if you need it to remain awake while plugged in.
 - A user-initiated Sleep/Hibernate, shutdown, reboot, battery depletion, or loss of power can stop the automation.
 - The task cannot run while the laptop is powered off.
