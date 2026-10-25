@@ -300,10 +300,52 @@ function Start-NaukriRefreshWithRecovery {
     }
     throw "Naukri Refresh could not be started after clean startup attempts."
 }
+# Hide Chromium top-level windows rather than merely moving them off-screen.
+# Keep headed Chromium (needed by Naukri) but remove its taskbar button.
+$script:NaukriWindowApiReady = $false
+try {
+    if (-not ("NaukriWindowHider" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class NaukriWindowHider {
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int command);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+}
+'@ -ErrorAction Stop
+    }
+    $script:NaukriWindowApiReady = $true
+} catch {
+    Write-LauncherLog ("Could not initialize Chromium window hider: " + $_.Exception.Message)
+}
+
 function Hide-NaukriBrowserWindows {
-    # Chromium is launched minimized and off-screen. Avoid runtime C#/Win32
-    # compilation here because Add-Type was stalling Task Scheduler startup.
-    return
+    if (-not $script:NaukriWindowApiReady) { return }
+    try {
+        $pids = @{}
+        foreach ($p in @(Get-NaukriProfileProcesses)) {
+            $pids[[int]$p.ProcessId] = $true
+        }
+        if ($pids.Count -eq 0) { return }
+
+        $callback = [NaukriWindowHider+EnumWindowsProc] {
+            param([IntPtr]$hWnd, [IntPtr]$lParam)
+            try {
+                [uint32]$ownerPid = 0
+                [void][NaukriWindowHider]::GetWindowThreadProcessId($hWnd, [ref]$ownerPid)
+                if ($pids.ContainsKey([int]$ownerPid) -and [NaukriWindowHider]::IsWindowVisible($hWnd)) {
+                    [void][NaukriWindowHider]::ShowWindow($hWnd, 0)
+                }
+            } catch {}
+            return $true
+        }
+        [void][NaukriWindowHider]::EnumWindows($callback, [IntPtr]::Zero)
+    } catch {
+        Write-LauncherLog ("Could not hide Chromium windows: " + $_.Exception.Message)
+    }
 }
 
 Write-LauncherLog "Stage 6: entering launcher main loop."
