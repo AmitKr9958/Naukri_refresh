@@ -11,6 +11,9 @@ Set-Location $repo
 # minimized and off-screen by refresh.js args; the Task Scheduler PowerShell
 # window remains hidden. Do not let .env HEADLESS=true override this.
 $env:HEADLESS = "false"
+# Capture local-only screenshots and visible UI labels when Naukri selectors fail.
+# Diagnostics remain on this PC; they are not uploaded automatically.
+$env:DEBUG_PROFILE_UI = "true"
 
 # Task Scheduler hides this PowerShell window, so persist all startup/recovery
 # output to a daily log. This makes stuck recovery loops diagnosable.
