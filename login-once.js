@@ -38,8 +38,8 @@ const profileUrl = process.env.PROFILE_URL || "https://www.naukri.com/mnjuser/pr
   try {
     context = await chromium.launchPersistentContext(profileDir, {
       headless: false,
-      viewport: { width: 1440, height: 900 },
-      args: ["--start-maximized"]
+      noDefaultViewport: true,
+      args: ["--start-maximized", "--window-position=0,0"]
     });
 
     const page = context.pages()[0] || await context.newPage();
