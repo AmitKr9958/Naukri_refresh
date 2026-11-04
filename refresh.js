@@ -681,7 +681,7 @@ async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText 
   throw new Error(
     "The file was selected, but Naukri did not show a verifiable upload confirmation or persisted resume entry. " +
     "No success notification will be sent. Visible page text: " +
-    bodyText.replace(/\\s+/g, " ").slice(0, 1800)
+    bodyText.replace(/\s+/g, " ").slice(0, 1800)
   );
 }
 
