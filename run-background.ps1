@@ -33,7 +33,7 @@ Write-LauncherLog ("Launcher started. PID=$PID; repo=$repo; Node=" + (Get-Comman
 Write-LauncherLog "Stage 1: direct file logging initialized."
 Write-LauncherLog "Stage 1b: HEADLESS=false; Chromium will be visible on the desktop."
 
-Write-LauncherLog "Stage 2: Chromium window hiding is disabled; headed browser remains visible."
+Write-LauncherLog "Stage 2: Chromium window will be explicitly restored and maximized in the interactive desktop."
 
 Write-LauncherLog "Stage 4: resolving profile and Node paths."
 $profileMarker = [IO.Path]::GetFullPath((Join-Path $repo "naukri-browser-profile"))
@@ -247,10 +247,10 @@ function Start-NaukriRefreshWithRecovery {
         Write-Host "Starting Naukri Refresh attempt $attempt/$MaxAttempts."
         if (-not (Reset-NaukriProfileLocks)) { Start-Sleep -Seconds 5; continue }
         try {
-            # Keep the Node process in a normal window state so its headed Chromium
-            # child can create a visible, maximized desktop window. The PowerShell
-            # Task Scheduler host remains hidden independently.
-            $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Normal
+            # Keep the Node console hidden. Show-NaukriBrowserWindows explicitly
+            # restores and maximizes only Chromium's top-level window in the
+            # interactive desktop session.
+            $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
 
             # Do not consider Node "started" merely because the process exists.
             # Playwright can launch Chromium and then remain stuck in
@@ -323,10 +323,35 @@ public static class NaukriWindowHider {
     Write-LauncherLog ("Could not initialize Chromium window hider: " + $_.Exception.Message)
 }
 
-function Hide-NaukriBrowserWindows {
-    # Intentionally disabled. Chromium must remain visible for interactive
-    # Naukri troubleshooting; only the Task Scheduler PowerShell host is hidden.
-    return
+function Show-NaukriBrowserWindows {
+    # Node is launched hidden so no console window appears. Explicitly restore
+    # and maximize the Chromium top-level window so the browser is still visible.
+    if (-not $script:NaukriWindowApiReady) { return }
+
+    try {
+        $profileProcesses = @(Get-NaukriProfileProcesses)
+        if (-not $profileProcesses) { return }
+
+        $targetPids = [System.Collections.Generic.HashSet[int]]::new()
+        foreach ($processInfo in $profileProcesses) {
+            [void]$targetPids.Add([int]$processInfo.ProcessId)
+        }
+
+        $callback = [NaukriWindowHider+EnumWindowsProc]{
+            param([IntPtr]$hWnd, [IntPtr]$lParam)
+            [uint32]$windowPid = 0
+            [void][NaukriWindowHider]::GetWindowThreadProcessId($hWnd, [ref]$windowPid)
+            if ($targetPids.Contains([int]$windowPid)) {
+                # SW_SHOWMAXIMIZED = 3; this also restores windows launched with SW_HIDE.
+                [void][NaukriWindowHider]::ShowWindow($hWnd, 3)
+            }
+            return $true
+        }.GetNewClosure()
+
+        [void][NaukriWindowHider]::EnumWindows($callback, [IntPtr]::Zero)
+    } catch {
+        Write-LauncherLog ("Could not restore/maximize Chromium window: " + $_.Exception.Message)
+    }
 }
 
 Write-LauncherLog "Stage 6: entering launcher main loop."
@@ -383,7 +408,7 @@ try {
             Write-Host "Could not clean stale refresh.js processes: $($_.Exception.Message)"
         }
 
-        Hide-NaukriBrowserWindows
+        Show-NaukriBrowserWindows
         try {
             Write-LauncherLog "Main loop: starting refresh.js recovery routine."
             $nodeProcess = Start-NaukriRefreshWithRecovery -MaxAttempts 5
