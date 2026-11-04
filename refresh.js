@@ -795,7 +795,7 @@ async function deleteExistingResume(page, fileInfo) {
         rect.height > 0;
     };
 
-    const filenamePattern = /^[^\\r\\n]{1,240}\\.(pdf|doc|docx|rtf|odt)$/i;
+    const filenamePattern = /^[^\r\n]{1,240}\.(pdf|doc|docx|rtf|odt)$/i;
     const leaves = elements.filter(element =>
       element.children.length === 0 &&
       isVisible(element) &&
