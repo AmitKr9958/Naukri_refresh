@@ -1053,6 +1053,43 @@ async function uploadResume(page, context) {
   const fileInfo = getResumeFileInfo();
   let lastError = null;
 
+  // Idempotency guard: Naukri's replacement prompt can remain mounted inside
+  // a hidden lightbox after the same resume has already been uploaded today.
+  // Do not repeatedly submit the identical file or report a false failure.
+  // The profile is checked again on every cycle; a new calendar day permits
+  // the normal upload flow to run again.
+  if (page && !page.isClosed()) {
+    const existingProfileText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+    const filenameIndex = existingProfileText.indexOf(fileInfo.name);
+    if (filenameIndex >= 0) {
+      const nearbyText = existingProfileText.slice(
+        Math.max(0, filenameIndex - 100),
+        Math.min(existingProfileText.length, filenameIndex + fileInfo.name.length + 160)
+      );
+      const today = new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Kolkata",
+        month: "short",
+        day: "numeric",
+        year: "numeric"
+      }).format(new Date());
+      const escapedToday = today.replace(/[.*+?^${}()|[\]\\]/g, "\\async function uploadResume(page, context) {
+  const fileInfo = getResumeFileInfo();
+  let lastError = null;
+");
+      const uploadedToday = new RegExp("Uploaded\\s+on\\s+" + escapedToday, "i").test(nearbyText);
+
+      if (uploadedToday) {
+        const confirmation = {
+          confirmed: true,
+          filename: fileInfo.name,
+          method: "Configured resume is already listed on the Naukri profile with today's upload date; duplicate replacement skipped"
+        };
+        log("Resume already current on Naukri for today; skipping duplicate replacement attempt.");
+        return confirmation;
+      }
+    }
+  }
+
   for (let attempt = 1; attempt <= UPLOAD_RETRIES; attempt++) {
     try {
       if (!page || page.isClosed()) {
