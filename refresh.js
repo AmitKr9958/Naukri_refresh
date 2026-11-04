@@ -708,9 +708,11 @@ async function tryNormalProfileUpdate(page) {
 }
 
 async function confirmResumeReplacement(page) {
-  // Naukri can render the replacement prompt well after the file input changes.
-  // Keep polling long enough for its asynchronous upload/duplicate check to finish.
-  const deadline = Date.now() + 55000;
+  // Naukri may delay its duplicate-resume confirmation well beyond the file
+  // input change. The latest observed UI rendered this link about two minutes
+  // after selection, so allow a full 150 seconds before declaring it absent.
+  const deadline = Date.now() + 150000;
+  let lastDomMatchAt = 0;
   let lastClickError = null;
 
   while (Date.now() < deadline) {
@@ -718,54 +720,46 @@ async function confirmResumeReplacement(page) {
       throw new Error("Naukri page closed while waiting for resume replacement confirmation.");
     }
 
-    // First use Playwright's accessible locator.
-    let confirmation = page.getByRole("link", {
-      name: "Yes, upload new",
-      exact: true
-    }).first();
+    // Match the exact link text after whitespace normalization. Do not rely
+    // solely on accessible-name computation: Naukri's SPA sometimes updates
+    // the anchor DOM before Playwright's accessibility snapshot catches up.
+    const candidateIndex = await page.locator("a").evaluateAll(links => {
+      return links.findIndex(link => {
+        const text = (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
+        return text === "yes, upload new";
+      });
+    }).catch(() => -1);
 
-    let visible = await confirmation.isVisible().catch(() => false);
-
-    // Naukri sometimes exposes the anchor in the DOM before its accessible
-    // name/visibility state is stable. Find only the exact, rendered link.
-    if (!visible) {
-      const visibleIndex = await page.locator("a").evaluateAll(links => {
-        return links.findIndex(link => {
-          const text = (link.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
-          if (text !== "yes, upload new") return false;
-          const style = window.getComputedStyle(link);
-          const rect = link.getBoundingClientRect();
-          return style.display !== "none" &&
+    if (candidateIndex >= 0) {
+      const candidate = page.locator("a").nth(candidateIndex);
+      const state = await candidate.evaluate(link => {
+        const style = window.getComputedStyle(link);
+        const rect = link.getBoundingClientRect();
+        return {
+          visible: style.display !== "none" &&
             style.visibility !== "hidden" &&
             Number(style.opacity || 1) > 0 &&
             rect.width > 0 &&
-            rect.height > 0;
-        });
-      }).catch(() => -1);
+            rect.height > 0,
+          text: (link.textContent || "").replace(/\\s+/g, " ").trim()
+        };
+      }).catch(() => ({ visible: false, text: "" }));
 
-      if (visibleIndex >= 0) {
-        confirmation = page.locator("a").nth(visibleIndex);
-        visible = true;
-      }
-    }
-
-    if (visible) {
-      try {
+      if (state.visible) {
         try {
-          await confirmation.click({ timeout: 5000 });
+          await candidate.click({ timeout: 7000 });
         } catch (clickError) {
-          // The confirmation is an explicit, visible Naukri link. If an
-          // animation/overlay intercepts Playwright's pointer action, invoke
-          // the click on that same rendered anchor only.
-          log("Standard click on replacement link was blocked; trying its rendered anchor: " + clickError.message);
-          await confirmation.evaluate(element => element.click());
+          log("Standard click on Naukri replacement link was blocked; trying the same rendered link directly: " + clickError.message);
+          await candidate.evaluate(element => element.click());
         }
 
         log("Clicked Naukri's explicit 'Yes, upload new' replacement link.");
 
-        const dismissed = await page.waitForFunction(() => {
+        // Confirm that the prompt has actually closed, not merely that a click
+        // was dispatched. This also prevents a false success on a stale dialog.
+        await page.waitForFunction(() => {
           return !Array.from(document.querySelectorAll("a")).some(link => {
-            const text = (link.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+            const text = (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
             if (text !== "yes, upload new") return false;
             const style = window.getComputedStyle(link);
             const rect = link.getBoundingClientRect();
@@ -775,28 +769,47 @@ async function confirmResumeReplacement(page) {
               rect.width > 0 &&
               rect.height > 0;
           });
-        }, undefined, { timeout: 15000 }).then(() => true).catch(() => false);
+        }, undefined, { timeout: 20000 });
 
-        if (!dismissed) {
-          throw new Error("Naukri's 'Yes, upload new' prompt remained visible after clicking.");
-        }
-
-        log("Naukri's resume replacement prompt was dismissed.");
+        log("Naukri's resume replacement prompt was dismissed after confirmation.");
         return true;
-      } catch (error) {
-        lastClickError = error;
-        log("Could not complete Naukri resume replacement confirmation: " + error.message);
+      }
+
+      // Record that the exact prompt exists in the DOM but is not yet rendered.
+      // This distinguishes delayed UI rendering from a missing prompt.
+      if (Date.now() - lastDomMatchAt > 15000) {
+        log("Naukri replacement link exists in the DOM but is not yet visibly rendered; continuing to wait.");
+        lastDomMatchAt = Date.now();
       }
     }
 
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(750);
   }
 
   if (lastClickError) {
     throw new Error("Resume replacement confirmation failed: " + lastClickError.message);
   }
 
-  log("Naukri did not display a visible resume replacement prompt within 55 seconds.");
+  // Capture whether the expected link exists at all when the wait expires.
+  const finalState = await page.locator("a").evaluateAll(links => {
+    const matches = links.filter(link =>
+      (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase() === "yes, upload new"
+    );
+    return matches.map(link => {
+      const style = window.getComputedStyle(link);
+      const rect = link.getBoundingClientRect();
+      return {
+        visible: style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity || 1) > 0 &&
+          rect.width > 0 &&
+          rect.height > 0,
+        text: (link.textContent || "").replace(/\\s+/g, " ").trim()
+      };
+    });
+  }).catch(() => []);
+
+  log("Naukri replacement prompt wait expired after 150 seconds. Matching link state: " + JSON.stringify(finalState));
   return false;
 }
 
