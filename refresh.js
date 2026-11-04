@@ -943,7 +943,7 @@ async function deleteExistingResume(page, fileInfo, recheckedAfterReload = false
           rect.width > 0 &&
           rect.height > 0;
       };
-      const filenamePattern = /^[^\\r\\n]{1,240}\\.(pdf|doc|docx|rtf|odt)$/i;
+      const filenamePattern = /^[^\r\n]{1,240}\.(pdf|doc|docx|rtf|odt)$/i;
       const remaining = Array.from(document.querySelectorAll("body *")).filter(element =>
         element.children.length === 0 &&
         visible(element) &&
@@ -964,7 +964,7 @@ async function deleteExistingResume(page, fileInfo, recheckedAfterReload = false
             rect.width > 0 &&
             rect.height > 0;
         };
-        const pattern = /^[^\\r\\n]{1,240}\\.(pdf|doc|docx|rtf|odt)$/i;
+        const filenamePattern = /^[^\r\n]{1,240}\.(pdf|doc|docx|rtf|odt)$/i;
         return elements.filter(element =>
           element.children.length === 0 &&
           visible(element) &&
