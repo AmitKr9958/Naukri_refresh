@@ -1210,7 +1210,8 @@ async function launchBrowserContext() {
     "--disable-blink-features=AutomationControlled",
     "--no-first-run",
     "--no-default-browser-check",
-    "--disable-features=DevToolsDebuggingRestrictions"
+    "--disable-features=DevToolsDebuggingRestrictions",
+    "--start-maximized"
   ];
 
   log(
@@ -1232,7 +1233,8 @@ async function launchBrowserContext() {
     const options = {
       headless: HEADLESS,
       timeout: launchTimeoutMs,
-      viewport: { width: 1440, height: 900 },
+      // Use the actual maximized desktop window dimensions instead of a fixed viewport.
+      viewport: null,
       // Naukri currently requires headed Chromium. Keep the real browser engine
       // active and visible on the desktop for interactive troubleshooting.
       // File uploads are handled by Playwright filechooser API.
