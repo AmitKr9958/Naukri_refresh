@@ -323,9 +323,12 @@ public static class NaukriWindowHider {
     Write-LauncherLog ("Could not initialize Chromium window hider: " + $_.Exception.Message)
 }
 
+$script:ShownNaukriWindowPids = [System.Collections.Generic.HashSet[int]]::new()
+
 function Show-NaukriBrowserWindows {
     # Node is launched hidden so no console window appears. Explicitly restore
-    # and maximize the Chromium top-level window so the browser is still visible.
+    # and maximize each new Chromium top-level window once; do not fight a
+    # user's later minimize action on every launcher polling cycle.
     if (-not $script:NaukriWindowApiReady) { return }
 
     try {
@@ -341,7 +344,7 @@ function Show-NaukriBrowserWindows {
             param([IntPtr]$hWnd, [IntPtr]$lParam)
             [uint32]$windowPid = 0
             [void][NaukriWindowHider]::GetWindowThreadProcessId($hWnd, [ref]$windowPid)
-            if ($targetPids.Contains([int]$windowPid)) {
+            if ($targetPids.Contains([int]$windowPid) -and $script:ShownNaukriWindowPids.Add([int]$windowPid)) {
                 # SW_SHOWMAXIMIZED = 3; this also restores windows launched with SW_HIDE.
                 [void][NaukriWindowHider]::ShowWindow($hWnd, 3)
             }
