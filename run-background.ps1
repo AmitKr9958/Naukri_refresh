@@ -1,6 +1,5 @@
 # Runs Naukri Refresh from Windows Task Scheduler.
-# The PowerShell launcher and the automation Chromium window are hidden.
-# Chromium remains headed because this is the mode verified to work with Naukri.
+# The PowerShell launcher stays hidden, but headed Chromium is intentionally visible on the desktop.
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -8,8 +7,8 @@ Set-Location $repo
 
 # Naukri profile/resume controls are not reliably available in headless Chromium.
 # Force headed mode for the automation process. The window is still started
-# minimized and off-screen by refresh.js args; the Task Scheduler PowerShell
-# window remains hidden. Do not let .env HEADLESS=true override this.
+# shown as a normal desktop window; the Task Scheduler PowerShell window remains hidden.
+# Do not let .env HEADLESS=true override this.
 $env:HEADLESS = "false"
 # Keep profile screenshots and verbose UI diagnostics opt-in; profile pages contain personal data.
 # Set DEBUG_PROFILE_UI=true explicitly in the process environment only when troubleshooting.
@@ -32,9 +31,9 @@ function Write-LauncherLog {
 }
 Write-LauncherLog ("Launcher started. PID=$PID; repo=$repo; Node=" + (Get-Command node.exe -ErrorAction SilentlyContinue).Source)
 Write-LauncherLog "Stage 1: direct file logging initialized."
-Write-LauncherLog "Stage 1b: HEADLESS forced to false (Naukri UI requires headed Chromium; window is minimized/off-screen)."
+Write-LauncherLog "Stage 1b: HEADLESS=false; Chromium will be visible on the desktop."
 
-Write-LauncherLog "Stage 2: skipping optional native window-helper compilation; Chromium is configured to start minimized and off-screen."
+Write-LauncherLog "Stage 2: Chromium window hiding is disabled; headed browser remains visible."
 
 Write-LauncherLog "Stage 4: resolving profile and Node paths."
 $profileMarker = [IO.Path]::GetFullPath((Join-Path $repo "naukri-browser-profile"))
@@ -322,29 +321,9 @@ public static class NaukriWindowHider {
 }
 
 function Hide-NaukriBrowserWindows {
-    if (-not $script:NaukriWindowApiReady) { return }
-    try {
-        $pids = @{}
-        foreach ($p in @(Get-NaukriProfileProcesses)) {
-            $pids[[int]$p.ProcessId] = $true
-        }
-        if ($pids.Count -eq 0) { return }
-
-        $callback = [NaukriWindowHider+EnumWindowsProc] {
-            param([IntPtr]$hWnd, [IntPtr]$lParam)
-            try {
-                [uint32]$ownerPid = 0
-                [void][NaukriWindowHider]::GetWindowThreadProcessId($hWnd, [ref]$ownerPid)
-                if ($pids.ContainsKey([int]$ownerPid) -and [NaukriWindowHider]::IsWindowVisible($hWnd)) {
-                    [void][NaukriWindowHider]::ShowWindow($hWnd, 0)
-                }
-            } catch {}
-            return $true
-        }
-        [void][NaukriWindowHider]::EnumWindows($callback, [IntPtr]::Zero)
-    } catch {
-        Write-LauncherLog ("Could not hide Chromium windows: " + $_.Exception.Message)
-    }
+    # Intentionally disabled. Chromium must remain visible for interactive
+    # Naukri troubleshooting; only the Task Scheduler PowerShell host is hidden.
+    return
 }
 
 Write-LauncherLog "Stage 6: entering launcher main loop."
