@@ -1101,13 +1101,16 @@ async function uploadResume(page, context) {
         await openProfile(page);
       }
 
-      // Let Naukri manage replacement through its own upload workflow.
-      // This works whether the profile has no resume, the same resume filename,
-      // or a different existing resume. Do not delete first: deletion controls
-      // vary across Naukri UI versions and can remove the old resume before a
-      // replacement is safely uploaded.
+      // Remove the existing profile entry only when it matches the configured
+      // resume filename. The helper clicks only the Delete control adjacent to
+      // that exact filename; if it is absent, proceed directly to upload.
+      const deletedExistingResume = await deleteExistingResume(page, fileInfo);
+      if (deletedExistingResume) {
+        log("Existing configured resume removed; uploading the configured replacement now.");
+      }
+
       const previousBodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
-      log("Starting Naukri's native resume upload/replacement flow without deleting the existing resume first.");
+      log("Starting Naukri resume upload after checking for the existing configured resume.");
       const uploadTarget = await clickNaukriResumeUploadControl(page);
       await setResumeFile(uploadTarget);
 
