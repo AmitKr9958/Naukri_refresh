@@ -891,7 +891,7 @@ async function deleteExistingResume(page, fileInfo) {
         if (!(await candidate.isVisible().catch(() => false))) continue;
 
         const label = await candidate.evaluate(element =>
-          (element.innerText || element.textContent || "").replace(/\\s+/g, " ").trim()
+          (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim()
         ).catch(() => "");
 
         if (/^delete$/i.test(label)) {
