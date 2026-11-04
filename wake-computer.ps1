@@ -31,7 +31,11 @@ public static class NaukriWakePower {
 
     # ES_CONTINUOUS | ES_SYSTEM_REQUIRED = keep the system awake.
     # Deliberately omit ES_DISPLAY_REQUIRED so the monitor may turn off.
-    $result = [NaukriWakePower]::SetThreadExecutionState(0x80000000 -bor 0x00000001)
+    # Use positive Int64 values before casting. PowerShell otherwise evaluates
+    # 0x80000000 as a signed Int32 and passes -2147483647 to the UInt32 API.
+    $keepAwakeFlags = [uint32]([int64]2147483648 -bor [int64]1)
+    $releaseFlags = [uint32]2147483648
+    $result = [NaukriWakePower]::SetThreadExecutionState($keepAwakeFlags)
     if ($result -eq 0) {
         throw "SetThreadExecutionState failed with Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())."
     }
@@ -45,7 +49,7 @@ public static class NaukriWakePower {
 } finally {
     if ($powerRequestActive) {
         # ES_CONTINUOUS without SYSTEM_REQUIRED releases this task's request.
-        [void][NaukriWakePower]::SetThreadExecutionState(0x80000000)
+        [void][NaukriWakePower]::SetThreadExecutionState($releaseFlags)
     }
     try {
         Add-Content -LiteralPath $logFile -Value ("[" + (Get-Date -Format o) + "] Wake task finished; temporary awake request released.")
