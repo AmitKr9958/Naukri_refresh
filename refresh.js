@@ -707,7 +707,7 @@ async function confirmResumeReplacement(page) {
 
     if (!visible) {
       confirmation = page.locator("a").filter({
-        hasText: /^\\s*Yes, upload new\\s*$/i
+        hasText: /^\s*Yes, upload new\s*$/i
       }).first();
       visible = await confirmation.isVisible().catch(() => false);
     }
