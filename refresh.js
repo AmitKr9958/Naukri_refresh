@@ -707,11 +707,122 @@ async function tryNormalProfileUpdate(page) {
   return { attempted: false, resumeUploaded: false };
 }
 
+async function deleteExistingResume(page, fileInfo) {
+  // Delete only the resume entry that contains the configured filename.
+  // Never click a generic Delete button elsewhere on the profile.
+  const filenameLocator = page.getByText(fileInfo.name, { exact: true }).first();
+  const filenameVisible = await filenameLocator.isVisible().catch(() => false);
+  if (!filenameVisible) {
+    log("No existing resume entry for " + fileInfo.name + " is visible; proceeding to upload.");
+    return false;
+  }
+
+  const deleteIndex = await filenameLocator.evaluate(filenameElement => {
+    const isVisible = element => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        Number(style.opacity || 1) > 0 &&
+        rect.width > 0 &&
+        rect.height > 0;
+    };
+
+    let container = filenameElement;
+    for (let depth = 0; depth < 9 && container; depth++, container = container.parentElement) {
+      const candidates = Array.from(container.querySelectorAll('a,button,[role="button"]'));
+      const match = candidates.find(element => {
+        if (!isVisible(element)) return false;
+        const label = [
+          element.innerText,
+          element.textContent,
+          element.getAttribute("aria-label"),
+          element.getAttribute("title"),
+          element.getAttribute("data-tooltip")
+        ].filter(Boolean).join(" ").replace(/\\s+/g, " ").trim().toLowerCase();
+        return /(^|\\b)(delete|remove)(\\b|$)/i.test(label) ||
+          /deleteonetheme/i.test(label);
+      });
+      if (match) {
+        const all = Array.from(document.querySelectorAll('a,button,[role="button"]'));
+        return all.indexOf(match);
+      }
+    }
+    return -1;
+  }).catch(() => -1);
+
+  if (deleteIndex < 0) {
+    throw new Error(
+      "The existing resume " + fileInfo.name +
+      " is visible, but its own Delete control could not be identified safely. " +
+      "No other Delete button was clicked."
+    );
+  }
+
+  const deleteControl = page.locator('a,button,[role="button"]').nth(deleteIndex);
+  const deleteLabel = await deleteControl.evaluate(element => ({
+    tag: element.tagName,
+    text: (element.innerText || element.textContent || "").replace(/\\s+/g, " ").trim(),
+    ariaLabel: element.getAttribute("aria-label"),
+    title: element.getAttribute("title")
+  })).catch(() => ({}));
+  log("Deleting the existing configured resume using its adjacent control: " + JSON.stringify(deleteLabel));
+
+  let nativeDialogHandled = false;
+  const dialogHandler = async dialog => {
+    nativeDialogHandled = true;
+    await dialog.accept().catch(() => {});
+  };
+  page.once("dialog", dialogHandler);
+
+  await deleteControl.click({ timeout: 8000 });
+
+  // Naukri may show an in-page confirmation dialog after the adjacent delete
+  // control is clicked. Confirm only inside a dialog that explicitly mentions
+  // deleting/removing the resume.
+  const dialog = page.getByRole("dialog").filter({ hasText: /delete|remove|resume/i }).first();
+  if (await dialog.isVisible({ timeout: 1800 }).catch(() => false)) {
+    const confirm = dialog.getByRole("button", { name: /^delete$/i }).first();
+    if (await confirm.isVisible().catch(() => false)) {
+      await confirm.click({ timeout: 5000 });
+    } else {
+      const yesDelete = dialog.getByRole("button", { name: /^(yes,?\\s*)?delete$/i }).first();
+      if (await yesDelete.isVisible().catch(() => false)) {
+        await yesDelete.click({ timeout: 5000 });
+      } else {
+        throw new Error("Naukri displayed a resume deletion dialog, but no safe Delete confirmation button was found.");
+      }
+    }
+  }
+
+  await page.waitForFunction(filename => {
+    const visible = element => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        Number(style.opacity || 1) > 0 &&
+        rect.width > 0 &&
+        rect.height > 0;
+    };
+    return !Array.from(document.querySelectorAll("body *")).some(element =>
+      element.children.length === 0 &&
+      (element.textContent || "").trim() === filename &&
+      visible(element)
+    );
+  }, fileInfo.name, { timeout: 20000 });
+
+  page.removeListener("dialog", dialogHandler);
+  log("Existing resume entry was deleted from the Naukri profile.");
+  await page.waitForTimeout(1500);
+  return true;
+}
+
 async function confirmResumeReplacement(page) {
   // Naukri may delay its duplicate-resume confirmation well beyond the file
   // input change. The latest observed UI rendered this link about two minutes
-  // after selection, so allow a full 150 seconds before declaring it absent.
-  const deadline = Date.now() + 150000;
+  // after selection, so allow a short 15-second duplicate-check window; the old resume is deleted before this upload.
+  const deadline = Date.now() + 15000;
   let lastDomMatchAt = 0;
   let lastClickError = null;
 
@@ -809,13 +920,14 @@ async function confirmResumeReplacement(page) {
     });
   }).catch(() => []);
 
-  log("Naukri replacement prompt wait expired after 150 seconds. Matching link state: " + JSON.stringify(finalState));
+  log("Naukri replacement prompt wait expired after 15 seconds. Matching link state: " + JSON.stringify(finalState));
   return false;
 }
 
 async function uploadResume(page, context) {
   const fileInfo = getResumeFileInfo();
   let lastError = null;
+
   for (let attempt = 1; attempt <= UPLOAD_RETRIES; attempt++) {
     try {
       if (!page || page.isClosed()) {
@@ -825,37 +937,79 @@ async function uploadResume(page, context) {
         page = await createFreshPage(context);
         await openProfile(page);
       }
+
       if (attempt > 1) {
-        log("Resume upload retry " + attempt + "/" + UPLOAD_RETRIES);
+        log("Resume delete-and-upload retry " + attempt + "/" + UPLOAD_RETRIES);
         await page.waitForTimeout(RETRY_DELAY_MS);
         if (page.isClosed()) page = await createFreshPage(context);
         await openProfile(page);
       }
+
+      // Required workflow: remove the existing resume first, then upload the
+      // configured local file. The adjacent resume-specific control is used.
+      await deleteExistingResume(page, fileInfo);
+
+      // Capture the page state after deletion so the old filename cannot be
+      // mistaken for evidence that the new file was uploaded.
       const previousBodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
       const uploadTarget = await clickNaukriResumeUploadControl(page);
       await setResumeFile(uploadTarget);
 
-      // Naukri asks for explicit confirmation when the same resume filename
-      // already exists. Click the actual link and wait for the prompt to close.
       const replacementConfirmed = await confirmResumeReplacement(page);
-
       const confirmation = await waitForResumeUploadConfirmation(
         page,
         fileInfo,
         previousBodyText,
         replacementConfirmed
       );
-      log("Naukri resume upload CONFIRMED: " + confirmation.filename +
-          " (verification: " + confirmation.method + ").");
-      return confirmation;
+
+      // Reload the profile and verify the uploaded resume is persisted on the
+      // server, not merely present in the current page's transient UI.
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(async error => {
+        log("Profile reload after upload did not reach DOMContentLoaded; waiting for resume entry instead: " + error.message);
+      });
+      await page.locator('input#attachCV[type="file"][aria-label="Upload resume"]')
+        .waitFor({ state: "attached", timeout: 45000 });
+
+      const persisted = await page.waitForFunction(filename => {
+        const visible = element => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            Number(style.opacity || 1) > 0 &&
+            rect.width > 0 &&
+            rect.height > 0;
+        };
+        const filenameVisible = Array.from(document.querySelectorAll("body *")).some(element =>
+          element.children.length === 0 &&
+          (element.textContent || "").trim() === filename &&
+          visible(element)
+        );
+        const body = (document.body && document.body.innerText || "").toLowerCase();
+        return filenameVisible && body.includes("uploaded on");
+      }, fileInfo.name, { timeout: 45000 }).then(() => true).catch(() => false);
+
+      if (!persisted) {
+        throw new Error("Naukri did not show the configured resume as a persisted profile entry after reloading the profile.");
+      }
+
+      const verified = {
+        confirmed: true,
+        filename: fileInfo.name,
+        method: "Deleted previous resume, uploaded configured file, and verified it remained on the profile after reload"
+      };
+      log("Naukri resume delete-and-upload CONFIRMED: " + verified.filename + " (verification: " + verified.method + ").");
+      return verified;
     } catch (error) {
       lastError = error;
-      log("Resume upload attempt " + attempt + "/" + UPLOAD_RETRIES + " failed: " + error.message);
+      log("Resume delete-and-upload attempt " + attempt + "/" + UPLOAD_RETRIES + " failed: " + error.message);
       if (page && page.isClosed() && context && !contextIsClosed(context)) {
         page = await createFreshPage(context).catch(() => page);
       }
     }
   }
+
   if (DEBUG_PROFILE_UI && page && !page.isClosed()) {
     await page.screenshot({
       path: path.join(logDir, "resume-upload-failure-" + Date.now() + ".png"),
@@ -871,7 +1025,8 @@ async function uploadResume(page, context) {
     ).catch(() => []);
     if (labels.length) log("Resume upload UI snapshot: " + JSON.stringify(labels));
   }
-  throw new Error("Naukri resume upload was NOT verified after " + UPLOAD_RETRIES +
+
+  throw new Error("Naukri resume delete-and-upload was NOT verified after " + UPLOAD_RETRIES +
     " attempts. " + (lastError ? lastError.message : "Unknown upload error"));
 }
 
