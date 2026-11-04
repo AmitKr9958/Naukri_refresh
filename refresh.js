@@ -780,16 +780,11 @@ async function tryNormalProfileUpdate(page) {
 }
 
 async function deleteExistingResume(page, fileInfo) {
-  // Delete only the resume entry that contains the configured filename.
+  // Naukri normally stores one active resume, but its filename may differ from
+  // the local configured filename. Find a visible resume document by extension
+  // and click only the Delete/Remove control adjacent to that exact entry.
   // Never click a generic Delete button elsewhere on the profile.
-  const filenameLocator = page.getByText(fileInfo.name, { exact: true }).first();
-  const filenameVisible = await filenameLocator.isVisible().catch(() => false);
-  if (!filenameVisible) {
-    log("No existing resume entry for " + fileInfo.name + " is visible; proceeding to upload.");
-    return false;
-  }
-
-  const deleteIndex = await filenameLocator.evaluate(filenameElement => {
+  const existingEntry = await page.locator("body *").evaluateAll(elements => {
     const isVisible = element => {
       const style = window.getComputedStyle(element);
       const rect = element.getBoundingClientRect();
@@ -800,94 +795,120 @@ async function deleteExistingResume(page, fileInfo) {
         rect.height > 0;
     };
 
-    let container = filenameElement;
-    for (let depth = 0; depth < 9 && container; depth++, container = container.parentElement) {
-      const candidates = Array.from(container.querySelectorAll('a,button,[role="button"]'));
-      const match = candidates.find(element => {
-        if (!isVisible(element)) return false;
-        const label = [
-          element.innerText,
-          element.textContent,
-          element.getAttribute("aria-label"),
-          element.getAttribute("title"),
-          element.getAttribute("data-tooltip")
-        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().toLowerCase();
-        return /(^|\b)(delete|remove)(\b|$)/i.test(label) ||
-          /deleteonetheme/i.test(label);
-      });
-      if (match) {
-        const all = Array.from(document.querySelectorAll('a,button,[role="button"]'));
-        return all.indexOf(match);
+    const filenamePattern = /^[^\\r\\n]{1,240}\\.(pdf|doc|docx|rtf|odt)$/i;
+    const leaves = elements.filter(element =>
+      element.children.length === 0 &&
+      isVisible(element) &&
+      filenamePattern.test((element.textContent || "").trim())
+    );
+
+    for (const filenameElement of leaves) {
+      const filename = (filenameElement.textContent || "").trim();
+      let container = filenameElement;
+
+      for (let depth = 0; depth < 10 && container; depth++, container = container.parentElement) {
+        const candidates = Array.from(container.querySelectorAll('a,button,[role="button"]'));
+        const match = candidates.find(element => {
+          if (!isVisible(element)) return false;
+          const label = [
+            element.innerText,
+            element.textContent,
+            element.getAttribute("aria-label"),
+            element.getAttribute("title"),
+            element.getAttribute("data-tooltip")
+          ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().toLowerCase();
+
+          return /(^|\b)(delete|remove)(\b|$)/i.test(label) ||
+            /deleteonetheme/i.test(label);
+        });
+
+        if (match) {
+          const all = Array.from(document.querySelectorAll('a,button,[role="button"]'));
+          return {
+            filename,
+            deleteIndex: all.indexOf(match)
+          };
+        }
       }
     }
-    return -1;
-  }).catch(() => -1);
 
-  if (deleteIndex < 0) {
+    return null;
+  }).catch(() => null);
+
+  if (!existingEntry) {
+    log("No visible existing resume document was found on the Naukri profile; proceeding directly to upload " + fileInfo.name + ".");
+    return false;
+  }
+
+  if (existingEntry.deleteIndex < 0) {
     throw new Error(
-      "The existing resume " + fileInfo.name +
-      " is visible, but its own Delete control could not be identified safely. " +
-      "No other Delete button was clicked."
+      "An existing resume (" + existingEntry.filename +
+      ") is visible, but its own Delete/Remove control could not be identified safely. " +
+      "No unrelated Delete button was clicked and the new resume was not uploaded."
     );
   }
 
-  const deleteControl = page.locator('a,button,[role="button"]').nth(deleteIndex);
+  const deleteControl = page.locator('a,button,[role="button"]').nth(existingEntry.deleteIndex);
   const deleteLabel = await deleteControl.evaluate(element => ({
     tag: element.tagName,
     text: (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim(),
     ariaLabel: element.getAttribute("aria-label"),
     title: element.getAttribute("title")
   })).catch(() => ({}));
-  log("Deleting the existing configured resume using its adjacent control: " + JSON.stringify(deleteLabel));
+
+  log("Deleting the existing Naukri resume entry (" + existingEntry.filename +
+      ") using its adjacent control: " + JSON.stringify(deleteLabel));
 
   const dialogHandler = async dialog => {
     await dialog.accept().catch(() => {});
   };
   page.once("dialog", dialogHandler);
 
-  await deleteControl.click({ timeout: 8000 });
+  try {
+    await deleteControl.click({ timeout: 8000 });
 
-  // Naukri may show an in-page confirmation dialog after the adjacent delete
-  // control is clicked. Confirm only inside a dialog that explicitly mentions
-  // deleting/removing the resume.
-  const dialog = page.getByRole("dialog").filter({ hasText: /delete|remove|resume/i }).first();
-  if (await dialog.isVisible({ timeout: 1800 }).catch(() => false)) {
-    const confirm = dialog.getByRole("button", { name: /^delete$/i }).first();
-    if (await confirm.isVisible().catch(() => false)) {
-      await confirm.click({ timeout: 5000 });
-    } else {
-      const yesDelete = dialog.getByRole("button", { name: /^(yes,?\s*)?delete$/i }).first();
-      if (await yesDelete.isVisible().catch(() => false)) {
-        await yesDelete.click({ timeout: 5000 });
+    // Confirm only inside a dialog that explicitly concerns deleting/removing
+    // the resume. Do not confirm unrelated dialogs.
+    const dialog = page.getByRole("dialog").filter({ hasText: /delete|remove|resume/i }).first();
+    if (await dialog.isVisible({ timeout: 1800 }).catch(() => false)) {
+      const confirm = dialog.getByRole("button", { name: /^delete$/i }).first();
+      if (await confirm.isVisible().catch(() => false)) {
+        await confirm.click({ timeout: 5000 });
       } else {
-        throw new Error("Naukri displayed a resume deletion dialog, but no safe Delete confirmation button was found.");
+        const yesDelete = dialog.getByRole("button", { name: /^(yes,?\s*)?delete$/i }).first();
+        if (await yesDelete.isVisible().catch(() => false)) {
+          await yesDelete.click({ timeout: 5000 });
+        } else {
+          throw new Error("Naukri displayed a resume deletion dialog, but no safe Delete confirmation button was found.");
+        }
       }
     }
+
+    await page.waitForFunction(filename => {
+      const visible = element => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity || 1) > 0 &&
+          rect.width > 0 &&
+          rect.height > 0;
+      };
+
+      return !Array.from(document.querySelectorAll("body *")).some(element =>
+        element.children.length === 0 &&
+        (element.textContent || "").trim() === filename &&
+        visible(element)
+      );
+    }, existingEntry.filename, { timeout: 20000 });
+  } finally {
+    page.removeListener("dialog", dialogHandler);
   }
 
-  await page.waitForFunction(filename => {
-    const visible = element => {
-      const style = window.getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      return style.display !== "none" &&
-        style.visibility !== "hidden" &&
-        Number(style.opacity || 1) > 0 &&
-        rect.width > 0 &&
-        rect.height > 0;
-    };
-    return !Array.from(document.querySelectorAll("body *")).some(element =>
-      element.children.length === 0 &&
-      (element.textContent || "").trim() === filename &&
-      visible(element)
-    );
-  }, fileInfo.name, { timeout: 20000 });
-
-  page.removeListener("dialog", dialogHandler);
-  log("Existing resume entry was deleted from the Naukri profile.");
+  log("Existing Naukri resume entry (" + existingEntry.filename + ") was deleted successfully.");
   await page.waitForTimeout(1500);
   return true;
 }
-
 async function logResumeReplacementDiagnostics(page) {
   try {
     const diagnostics = await page.evaluate(() => {
