@@ -336,6 +336,7 @@ function Show-NaukriBrowserWindows {
         if (-not $profileProcesses) { return }
 
         $targetPids = [System.Collections.Generic.HashSet[int]]::new()
+        $shownPids = $script:ShownNaukriWindowPids
         foreach ($processInfo in $profileProcesses) {
             [void]$targetPids.Add([int]$processInfo.ProcessId)
         }
@@ -344,7 +345,7 @@ function Show-NaukriBrowserWindows {
             param([IntPtr]$hWnd, [IntPtr]$lParam)
             [uint32]$windowPid = 0
             [void][NaukriWindowHider]::GetWindowThreadProcessId($hWnd, [ref]$windowPid)
-            if ($targetPids.Contains([int]$windowPid) -and $script:ShownNaukriWindowPids.Add([int]$windowPid)) {
+            if ($targetPids.Contains([int]$windowPid) -and $shownPids.Add([int]$windowPid)) {
                 # SW_SHOWMAXIMIZED = 3; this also restores windows launched with SW_HIDE.
                 [void][NaukriWindowHider]::ShowWindow($hWnd, 3)
             }
