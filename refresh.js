@@ -867,21 +867,43 @@ async function deleteExistingResume(page, fileInfo) {
   try {
     await deleteControl.click({ timeout: 8000 });
 
-    // Confirm only inside a dialog that explicitly concerns deleting/removing
-    // the resume. Do not confirm unrelated dialogs.
-    const dialog = page.getByRole("dialog").filter({ hasText: /delete|remove|resume/i }).first();
-    if (await dialog.isVisible({ timeout: 1800 }).catch(() => false)) {
-      const confirm = dialog.getByRole("button", { name: /^delete$/i }).first();
-      if (await confirm.isVisible().catch(() => false)) {
-        await confirm.click({ timeout: 5000 });
-      } else {
-        const yesDelete = dialog.getByRole("button", { name: /^(yes,?\s*)?delete$/i }).first();
-        if (await yesDelete.isVisible().catch(() => false)) {
-          await yesDelete.click({ timeout: 5000 });
-        } else {
-          throw new Error("Naukri displayed a resume deletion dialog, but no safe Delete confirmation button was found.");
+    // Naukri's confirmation popup is not consistently exposed with
+    // role="dialog". Require the exact resume-deletion question, then click
+    // only a visible control whose complete label is "Delete".
+    const confirmationPrompt = page.getByText(
+      /are you sure you want to delete the resume/i
+    ).first();
+    const promptVisible = await confirmationPrompt.isVisible({ timeout: 5000 }).catch(() => false);
+
+    if (promptVisible) {
+      const confirmCandidates = page.locator('button, [role="button"], a');
+      let confirmed = false;
+
+      for (let index = 0; index < await confirmCandidates.count(); index++) {
+        const candidate = confirmCandidates.nth(index);
+        if (!(await candidate.isVisible().catch(() => false))) continue;
+
+        const label = await candidate.evaluate(element =>
+          (element.innerText || element.textContent || "").replace(/\\s+/g, " ").trim()
+        ).catch(() => "");
+
+        if (/^delete$/i.test(label)) {
+          await candidate.click({ timeout: 5000 });
+          confirmed = true;
+          log("Confirmed Naukri's resume deletion using the visible modal Delete button.");
+          break;
         }
       }
+
+      if (!confirmed) {
+        throw new Error(
+          "Naukri displayed the resume deletion confirmation prompt, but its visible Delete button could not be identified safely."
+        );
+      }
+    } else {
+      // Some Naukri UI versions may delete immediately without a confirmation
+      // popup. The filename disappearance check below verifies that outcome.
+      log("No resume deletion confirmation popup appeared; verifying whether deletion completed immediately.");
     }
 
     await page.waitForFunction(filename => {
