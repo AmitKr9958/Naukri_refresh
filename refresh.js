@@ -711,7 +711,7 @@ async function confirmResumeReplacement(page) {
     if (!visible) {
       const visibleIndex = await page.locator("a").evaluateAll(links => {
         return links.findIndex(link => {
-          const text = (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
+          const text = (link.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
           if (text !== "yes, upload new") return false;
           const style = window.getComputedStyle(link);
           const rect = link.getBoundingClientRect();
@@ -745,7 +745,7 @@ async function confirmResumeReplacement(page) {
 
         const dismissed = await page.waitForFunction(() => {
           return !Array.from(document.querySelectorAll("a")).some(link => {
-            const text = (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
+            const text = (link.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
             if (text !== "yes, upload new") return false;
             const style = window.getComputedStyle(link);
             const rect = link.getBoundingClientRect();
