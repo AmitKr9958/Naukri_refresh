@@ -127,11 +127,19 @@ function Test-NaukriProfileProcess {
 }
 
 function Get-NaukriProfileProcesses {
+    # IMPORTANT: only return the actual browser-owner process.
+    # Chromium creates many helper processes (crashpad, GPU, renderer and
+    # utility). They inherit --user-data-dir, but they do NOT own the browser
+    # window. Restoring/maximizing their HWNDs was causing extra windows to
+    # appear. The Playwright-launched browser owner has --remote-debugging-pipe
+    # and does not have a --type= helper-process argument.
     $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     @(
         $all | Where-Object {
             $_.Name -match "^(chrome|msedge|chromium)(\.exe)?$" -and
-            (Test-NaukriProfileProcess $_)
+            (Test-NaukriProfileProcess $_) -and
+            $_.CommandLine -match '(?i)(^|\s)--remote-debugging-pipe(\s|$)' -and
+            $_.CommandLine -notmatch '(?i)(^|\s)--type='
         }
     )
 }
