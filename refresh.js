@@ -862,6 +862,88 @@ async function deleteExistingResume(page, fileInfo) {
   return true;
 }
 
+async function logResumeReplacementDiagnostics(page) {
+  try {
+    const diagnostics = await page.evaluate(() => {
+      const describe = element => {
+        if (!element) return null;
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return {
+          tag: element.tagName,
+          id: element.id || null,
+          className: typeof element.className === "string" ? element.className.slice(0, 240) : null,
+          text: (element.innerText || element.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 240),
+          style: {
+            display: style.display,
+            visibility: style.visibility,
+            opacity: style.opacity,
+            pointerEvents: style.pointerEvents,
+            position: style.position,
+            zIndex: style.zIndex
+          },
+          rect: {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height)
+          }
+        };
+      };
+
+      const links = Array.from(document.querySelectorAll("a")).filter(link =>
+        (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase() === "yes, upload new"
+      ).map(link => {
+        const ancestors = [];
+        let current = link;
+        for (let depth = 0; depth < 6 && current; depth++, current = current.parentElement) {
+          ancestors.push(describe(current));
+        }
+        return {
+          link: describe(link),
+          outerHTML: link.outerHTML.slice(0, 1200),
+          ancestors
+        };
+      });
+
+      const input = document.querySelector('input#attachCV[type="file"][aria-label="Upload resume"]');
+      const resumeInput = input ? {
+        id: input.id,
+        type: input.type,
+        ariaLabel: input.getAttribute("aria-label"),
+        accept: input.getAttribute("accept"),
+        disabled: input.disabled,
+        fileCount: input.files ? input.files.length : 0,
+        parentChain: (() => {
+          const result = [];
+          let current = input;
+          for (let depth = 0; depth < 4 && current; depth++, current = current.parentElement) {
+            result.push(describe(current));
+          }
+          return result;
+        })()
+      } : null;
+
+      return {
+        capturedAt: new Date().toISOString(),
+        url: location.href,
+        title: document.title,
+        replacementLinks: links,
+        resumeInput
+      };
+    });
+
+    log("Resume replacement diagnostics: " + JSON.stringify(diagnostics));
+    if (DEBUG_PROFILE_UI) {
+      const screenshotPath = path.join(logDir, "resume-replacement-diagnostics-" + Date.now() + ".png");
+      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+      log("Resume replacement diagnostic screenshot saved: " + screenshotPath);
+    }
+  } catch (error) {
+    log("Could not capture resume replacement diagnostics: " + error.message);
+  }
+}
+
 async function confirmResumeReplacement(page) {
   // The existing resume is deleted before upload, so a duplicate prompt should be unusual.
   // Keep a short fallback window in case Naukri still displays one.
@@ -964,6 +1046,7 @@ async function confirmResumeReplacement(page) {
   }).catch(() => []);
 
   log("Naukri replacement prompt wait expired after 15 seconds. Matching link state: " + JSON.stringify(finalState));
+  await logResumeReplacementDiagnostics(page);
   return false;
 }
 
