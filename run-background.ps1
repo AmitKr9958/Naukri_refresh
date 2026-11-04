@@ -332,7 +332,7 @@ public static class NaukriWindowHider {
     Write-LauncherLog ("Could not initialize Chromium window hider: " + $_.Exception.Message)
 }
 
-$script:ShownNaukriWindowPids = [System.Collections.Generic.HashSet[int]]::new()
+$script:HiddenNaukriWindowPids = [System.Collections.Generic.HashSet[int]]::new()
 
 function Hide-NaukriBrowserWindows {
     # Node is launched hidden. Hide each Chromium top-level window as soon as
@@ -344,7 +344,7 @@ function Hide-NaukriBrowserWindows {
         if (-not $profileProcesses) { return }
 
         $targetPids = [System.Collections.Generic.HashSet[int]]::new()
-        $shownPids = $script:ShownNaukriWindowPids
+        $hiddenPids = $script:ShownNaukriWindowPids
         foreach ($processInfo in $profileProcesses) {
             [void]$targetPids.Add([int]$processInfo.ProcessId)
         }
@@ -363,7 +363,7 @@ function Hide-NaukriBrowserWindows {
 
         [void][NaukriWindowHider]::EnumWindows($callback, [IntPtr]::Zero)
     } catch {
-        Write-LauncherLog ("Could not restore/maximize Chromium window: " + $_.Exception.Message)
+        Write-LauncherLog ("Could not hide Chromium window: " + $_.Exception.Message)
     }
 }
 
