@@ -20,7 +20,7 @@ function readPositiveNumberEnv(name, fallback, minimum = 1, integer = false) {
 
 const PROFILE_URL = process.env.PROFILE_URL || "https://www.naukri.com/mnjuser/profile";
 const RESUME_PATH = path.resolve(process.env.RESUME_PATH || "");
-const INTERVAL_MINUTES = readPositiveNumberEnv("REFRESH_INTERVAL_MINUTES", 20, 1, true);
+const INTERVAL_MINUTES = 5; // Required fixed interval: begin a new cycle every five minutes.
 const MAX_FAILURES = readPositiveNumberEnv("MAX_CONSECUTIVE_FAILURES", 3, 1, true);
 // Naukri profile/resume controls are not reliably visible under headless Chromium.
 // Prefer headed mode. run-background.ps1 forces HEADLESS=false for the scheduled task.
@@ -1181,6 +1181,7 @@ async function recoverBrowserContext(currentContext) {
     process.on("SIGTERM", stop);
 
     while (true) {
+      const cycleStartedAt = Date.now();
       cycle++;
       writeHealth("RUNNING", cycle, { phase: "starting_cycle" });
       await flushPendingTelegramNotifications();
@@ -1344,11 +1345,20 @@ async function recoverBrowserContext(currentContext) {
         }
       }
 
-      writeHealth("WAITING", cycle, { phase: "waiting", next_cycle: cycle + 1, next_cycle_after_minutes: INTERVAL_MINUTES });
-      log("Cycle " + cycle + ": waiting " + INTERVAL_MINUTES + " minutes");
-      await new Promise(resolve =>
-        setTimeout(resolve, INTERVAL_MINUTES * 60 * 1000)
+      const remainingIntervalMs = Math.max(
+        0,
+        INTERVAL_MINUTES * 60 * 1000 - (Date.now() - cycleStartedAt)
       );
+      writeHealth("WAITING", cycle, {
+        phase: "waiting",
+        next_cycle: cycle + 1,
+        next_cycle_after_minutes: Number((remainingIntervalMs / 60000).toFixed(2))
+      });
+      log("Cycle " + cycle + ": next cycle scheduled in " +
+        Math.ceil(remainingIntervalMs / 1000) + " seconds (five-minute start-to-start interval).");
+      if (remainingIntervalMs > 0) {
+        await new Promise(resolve => setTimeout(resolve, remainingIntervalMs));
+      }
     }
   } catch (error) {
     writeHealth("STARTUP_FAILED", 0, { phase: "startup", error: error.message });
