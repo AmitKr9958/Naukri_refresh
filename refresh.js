@@ -655,9 +655,9 @@ async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText 
         return filenameNodes.some(filenameNode => {
           let section = filenameNode;
           for (let depth = 0; depth < 10 && section; depth++, section = section.parentElement) {
-            const text = (section.innerText || "").replace(/\\s+/g, " ").trim();
-            if (/uploaded on\\s*[:：]?\\s*\\w{3,9}\\s+\\d{1,2},?\\s+\\d{4}/i.test(text) ||
-                /uploaded on\\s*[:：]?\\s*\\d{1,2}[-/ ]\\w{3,9}[-/ ]\\d{2,4}/i.test(text)) return true;
+            const text = (section.innerText || "").replace(/\s+/g, " ").trim();
+            if (/uploaded on\s*[:：]?\s*\w{3,9}\s+\d{1,2},?\s+\d{4}/i.test(text) ||
+                /uploaded on\s*[:：]?\s*\d{1,2}[-/ ]\w{3,9}[-/ ]\d{2,4}/i.test(text)) return true;
           }
           return false;
         });
