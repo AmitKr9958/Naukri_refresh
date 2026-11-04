@@ -604,38 +604,84 @@ async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText 
   ];
   const deadline = Date.now() + 60000;
   let bodyText = "";
+  const filenameWasAlreadyVisible = String(previousBodyText).toLowerCase().includes(fileInfo.name.toLowerCase());
+
   while (Date.now() < deadline) {
     if (page.isClosed()) throw new Error("Naukri page closed before upload confirmation.");
-    bodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
+
+    // Naukri sometimes dismisses its replacement prompt by re-rendering the
+    // profile SPA. During that transition body.innerText can temporarily be
+    // empty. Treat that as a loading state, not as a failed upload.
+    bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
     const match = patterns.find(pattern => pattern.test(bodyText));
-    if (match) return { confirmed: true, method: "Naukri success message", filename: fileInfo.name };
-    const filenameWasAlreadyVisible = String(previousBodyText).toLowerCase().includes(fileInfo.name.toLowerCase());
-    if (!filenameWasAlreadyVisible && bodyText.toLowerCase().includes(fileInfo.name.toLowerCase())) {
-      // Filename appearance is useful only when it was absent before this
-      // upload attempt. An existing same-name resume must not count as proof
-      // that Naukri accepted a replacement.
-      return { confirmed: true, method: "Newly displayed uploaded filename", filename: fileInfo.name };
+    if (match) {
+      return { confirmed: true, method: "Naukri success message", filename: fileInfo.name };
     }
-    // When replacing the same filename, it is already present before upload.
-    // Only accept it after Naukri's explicit replacement prompt was clicked
-    // and dismissed, while the resume entry remains visible on the profile.
-    if (
-      replacementConfirmed &&
-      bodyText.toLowerCase().includes(fileInfo.name.toLowerCase()) &&
-      /uploaded on/i.test(bodyText)
-    ) {
+
+    const lowerBody = bodyText.toLowerCase();
+    const hasFilename = lowerBody.includes(fileInfo.name.toLowerCase());
+    const hasUploadedDate = /uploaded on/i.test(bodyText);
+
+    if (!filenameWasAlreadyVisible && hasFilename && hasUploadedDate) {
+      return { confirmed: true, method: "Newly displayed uploaded resume entry", filename: fileInfo.name };
+    }
+
+    if (replacementConfirmed && hasFilename && hasUploadedDate) {
       return {
         confirmed: true,
-        method: "Naukri replacement prompt accepted and resume entry remains visible",
+        method: "Replacement accepted and uploaded resume entry re-rendered",
         filename: fileInfo.name
       };
     }
+
     await page.waitForTimeout(1000);
   }
+
+  // Recovery path: after a successful "Yes, upload new" click, Naukri may
+  // leave the SPA body blank even though the upload has completed. Re-open
+  // the profile and verify the server-persisted resume before declaring failure
+  // or starting another upload attempt. This avoids repeatedly selecting the
+  // same file and creating duplicate replacement prompts.
+  if (replacementConfirmed || !filenameWasAlreadyVisible) {
+    log("Upload confirmation UI did not settle; reopening the profile once to verify the persisted resume.");
+    await page.goto(PROFILE_URL, { waitUntil: "commit", timeout: 30000 });
+    await page.locator('input#attachCV[type="file"][aria-label="Upload resume"]')
+      .waitFor({ state: "attached", timeout: 45000 });
+
+    const persisted = await page.waitForFunction(filename => {
+      const visible = element => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity || 1) > 0 &&
+          rect.width > 0 &&
+          rect.height > 0;
+      };
+      const filenameVisible = Array.from(document.querySelectorAll("body *")).some(element =>
+        element.children.length === 0 &&
+        (element.textContent || "").trim() === filename &&
+        visible(element)
+      );
+      const body = (document.body && document.body.innerText || "");
+      return filenameVisible && /uploaded on/i.test(body);
+    }, fileInfo.name, { timeout: 30000 }).then(() => true).catch(() => false);
+
+    if (persisted) {
+      return {
+        confirmed: true,
+        method: "Profile reopened after upload; configured resume is persisted on Naukri",
+        filename: fileInfo.name
+      };
+    }
+
+    bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+  }
+
   throw new Error(
-    "The file was selected, but Naukri did not show a verifiable upload confirmation within 60 seconds. " +
+    "The file was selected, but Naukri did not show a verifiable upload confirmation or persisted resume entry. " +
     "No success notification will be sent. Visible page text: " +
-    bodyText.replace(/\s+/g, " ").slice(0, 1800)
+    bodyText.replace(/\\s+/g, " ").slice(0, 1800)
   );
 }
 
