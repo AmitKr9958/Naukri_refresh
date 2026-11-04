@@ -41,6 +41,7 @@ public static class NaukriWakePower {
     }
 
     $powerRequestActive = $true
+    Add-Content -LiteralPath $logFile -Value ("[" + (Get-Date -Format o) + "] System awake request applied successfully for up to $awakeSeconds seconds; display remains eligible to turn off.")
     Start-Sleep -Seconds $awakeSeconds
 } catch {
     try {
