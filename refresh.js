@@ -1102,7 +1102,7 @@ async function confirmResumeReplacement(page) {
         // was dispatched. This also prevents a false success on a stale dialog.
         const promptDismissed = await page.waitForFunction(() => {
           return !Array.from(document.querySelectorAll("a")).some(link => {
-            const text = (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
+            const text = (link.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
             if (text !== "yes, upload new") return false;
             const style = window.getComputedStyle(link);
             const rect = link.getBoundingClientRect();
