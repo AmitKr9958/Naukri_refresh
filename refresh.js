@@ -20,7 +20,7 @@ function readPositiveNumberEnv(name, fallback, minimum = 1, integer = false) {
 
 const PROFILE_URL = process.env.PROFILE_URL || "https://www.naukri.com/mnjuser/profile";
 const RESUME_PATH = path.resolve(process.env.RESUME_PATH || "");
-const INTERVAL_MINUTES = readPositiveNumberEnv("REFRESH_INTERVAL_MINUTES", 20, 1, true);
+const INTERVAL_MINUTES = 5; // Required fixed interval: begin a new cycle every five minutes.
 const MAX_FAILURES = readPositiveNumberEnv("MAX_CONSECUTIVE_FAILURES", 3, 1, true);
 // Naukri profile/resume controls are not reliably visible under headless Chromium.
 // Prefer headed mode. run-background.ps1 forces HEADLESS=false for the scheduled task.
@@ -295,17 +295,15 @@ async function flushPendingTelegramNotifications() {
   }
 }
 
-async function sendTelegramSuccess(cycle) {
+async function sendTelegramSuccess(cycle, confirmation) {
   const message =
-    "🟢 Naukri Automation — SUCCESS\n\n" +
+    "🟢 Naukri Automation — RESUME UPLOAD CONFIRMED\n\n" +
     "Run: #" + cycle + "\n" +
-    "Profile update: Completed/attempted\n" +
-    "Resume upload: Completed successfully\n" +
+    "Resume: " + confirmation.filename + "\n" +
+    "Verification: " + confirmation.method + "\n" +
     "Interval: " + INTERVAL_MINUTES + " minutes\n" +
-    "Time: " +
-    new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + "\n\n" +
-    "Status: Running normally";
-
+    "Time: " + new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + "\n\n" +
+    "Status: Naukri displayed an upload confirmation";
   await sendTelegramMessage(message, "success");
 }
 
@@ -441,13 +439,32 @@ async function openProfile(page) {
         await page.waitForTimeout(RETRY_DELAY_MS);
       }
 
+      // Do not wait for DOMContentLoaded: Naukri's analytics/third-party
+      // resources can hold that event open even after the profile response
+      // has committed. Wait for navigation commit, then for the real resume
+      // upload control that proves the profile application is usable.
       await page.goto(PROFILE_URL, {
-        waitUntil: "domcontentloaded",
-        timeout: 45000
+        waitUntil: "commit",
+        timeout: 30000
       });
 
-      await page.waitForTimeout(2500);
+      await page.locator('input#attachCV[type="file"][aria-label="Upload resume"]')
+        .waitFor({ state: "attached", timeout: 45000 });
+
+      await page.waitForFunction(() => {
+        const input = document.querySelector('input#attachCV[type="file"][aria-label="Upload resume"]');
+        return Boolean(input && input.isConnected && !input.disabled);
+      }, undefined, { timeout: 15000 });
+
+      await page.waitForTimeout(1500);
       await dismissPopups(page);
+
+      const currentUrl = page.url();
+      if (/login|signin|sign-in/i.test(currentUrl)) {
+        throw new Error("Naukri redirected to login; the saved session may have expired.");
+      }
+
+      log("Naukri profile is ready; the dedicated resume upload input is attached and enabled.");
       return;
     } catch (error) {
       lastError = error;
@@ -456,16 +473,13 @@ async function openProfile(page) {
         " failed: " + error.message
       );
 
-      // A timed-out page can remain in a bad loading state. Dispose of that
-      // page before retrying so the next attempt always starts clean.
-      if (attempt < NAVIGATION_RETRIES && page && !page.isClosed()) {
-        await page.close().catch(() => {});
-      }
+      // Reuse the page on retry. A failed DOMContentLoaded wait must not be
+      // treated as proof that the profile itself failed to load.
     }
   }
 
   throw new Error(
-    "Could not open Naukri profile after " +
+    "Could not open a usable Naukri profile after " +
     NAVIGATION_RETRIES +
     " attempts. Last error: " +
     (lastError ? lastError.message : "unknown navigation error")
@@ -500,24 +514,175 @@ async function createFreshPage(context) {
   return await context.newPage();
 }
 
-async function setResumeFile(page, fileChooser = null) {
+const MAX_RESUME_BYTES = readPositiveNumberEnv("MAX_RESUME_BYTES", 2 * 1024 * 1024, 1024, true);
+
+function getResumeFileInfo() {
   if (!RESUME_PATH || !fs.existsSync(RESUME_PATH)) {
     throw new Error("RESUME_PATH does not exist: " + RESUME_PATH);
   }
+  const stat = fs.statSync(RESUME_PATH);
+  if (!stat.isFile()) throw new Error("RESUME_PATH is not a file: " + RESUME_PATH);
+  if (stat.size > MAX_RESUME_BYTES) {
+    throw new Error(
+      "Resume file exceeds Naukri's 2 MB limit shown on the profile. " +
+      "File: " + path.basename(RESUME_PATH) +
+      "; current size: " + (stat.size / (1024 * 1024)).toFixed(2) + " MB. " +
+      "Compress the DOCX or point RESUME_PATH to a file no larger than 2 MB."
+    );
+  }
+  return {
+    name: path.basename(RESUME_PATH),
+    size: stat.size,
+    size_mb: Number((stat.size / (1024 * 1024)).toFixed(2))
+  };
+}
 
-  if (fileChooser) {
-    await fileChooser.setFiles(RESUME_PATH);
-    return true;
+async function setResumeFile(uploadTarget) {
+  const info = getResumeFileInfo();
+  if (!uploadTarget) throw new Error("Naukri's identified resume upload input was not available.");
+
+  // Naukri's current UI identifies the resume input as #attachCV. Its visible
+  // dummy button overlays the input, so clicking the button is intercepted.
+  // setInputFiles on this exact input avoids pointer interaction and does not
+  // touch the separate profile-photo input.
+  if (uploadTarget.kind === "file-input") {
+    await uploadTarget.locator.setInputFiles(RESUME_PATH);
+  } else if (uploadTarget.kind === "file-chooser") {
+    await uploadTarget.chooser.setFiles(RESUME_PATH);
+  } else {
+    throw new Error("Unsupported Naukri resume upload target.");
   }
 
-  const input = page.locator('input[type="file"]').first();
+  log("Resume file supplied to Naukri's identified resume control: " +
+      info.name + " (" + info.size_mb + " MB).");
+  return info;
+}
 
-  if (await input.count()) {
-    await input.setInputFiles(RESUME_PATH);
-    return true;
+async function clickNaukriResumeUploadControl(page) {
+  const selectors = [
+    'input#attachCV[type="file"][aria-label="Upload resume"]',
+    'input[type="file"][aria-label="Upload resume"]'
+  ];
+
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+    if (await locator.count()) {
+      if (!(await locator.isEnabled().catch(() => false))) {
+        throw new Error("Naukri's identified resume input is disabled: " + selector);
+      }
+      log("Identified Naukri resume input using selector: " + selector);
+      return { kind: "file-input", locator };
+    }
   }
 
-  return false;
+  // Strict fallback: use only the explicit resume-upload text and a real
+  // file chooser. Do not click generic buttons or arbitrary file inputs.
+  const control = page.getByText(/^Upload resume$/i).first();
+  if (await control.isVisible({ timeout: 1200 }).catch(() => false)) {
+    const chooserPromise = page.waitForEvent("filechooser", { timeout: 10000 }).catch(() => null);
+    await control.click({ timeout: 5000 }).catch(error => {
+      log("Visible Upload resume text click did not open chooser: " + error.message);
+    });
+    const chooser = await chooserPromise;
+    if (chooser) return { kind: "file-chooser", chooser };
+  }
+
+  throw new Error(
+    "Naukri's specific resume input (#attachCV with aria-label Upload resume) " +
+    "and its associated file chooser were not found. No unrelated file input was used."
+  );
+}
+
+async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText = "", replacementConfirmed = false) {
+  const patterns = [
+    /resume uploaded successfully/i,
+    /resume has been uploaded/i,
+    /resume updated successfully/i,
+    /successfully uploaded.*resume/i,
+    /resume upload successful/i,
+    /file uploaded successfully/i
+  ];
+  const deadline = Date.now() + 60000;
+  let bodyText = "";
+  const filenameWasAlreadyVisible = String(previousBodyText).toLowerCase().includes(fileInfo.name.toLowerCase());
+
+  while (Date.now() < deadline) {
+    if (page.isClosed()) throw new Error("Naukri page closed before upload confirmation.");
+
+    // Naukri sometimes dismisses its replacement prompt by re-rendering the
+    // profile SPA. During that transition body.innerText can temporarily be
+    // empty. Treat that as a loading state, not as a failed upload.
+    bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+    const match = patterns.find(pattern => pattern.test(bodyText));
+    if (match) {
+      return { confirmed: true, method: "Naukri success message", filename: fileInfo.name };
+    }
+
+    const lowerBody = bodyText.toLowerCase();
+    const hasFilename = lowerBody.includes(fileInfo.name.toLowerCase());
+    const hasUploadedDate = /uploaded on/i.test(bodyText);
+
+    if (!filenameWasAlreadyVisible && hasFilename && hasUploadedDate) {
+      return { confirmed: true, method: "Newly displayed uploaded resume entry", filename: fileInfo.name };
+    }
+
+    if (replacementConfirmed && hasFilename && hasUploadedDate) {
+      return {
+        confirmed: true,
+        method: "Replacement accepted and uploaded resume entry re-rendered",
+        filename: fileInfo.name
+      };
+    }
+
+    await page.waitForTimeout(1000);
+  }
+
+  // Recovery path: after a successful "Yes, upload new" click, Naukri may
+  // leave the SPA body blank even though the upload has completed. Re-open
+  // the profile and verify the server-persisted resume before declaring failure
+  // or starting another upload attempt. This avoids repeatedly selecting the
+  // same file and creating duplicate replacement prompts.
+  if (replacementConfirmed || !filenameWasAlreadyVisible) {
+    log("Upload confirmation UI did not settle; reopening the profile once to verify the persisted resume.");
+    await page.goto(PROFILE_URL, { waitUntil: "commit", timeout: 30000 });
+    await page.locator('input#attachCV[type="file"][aria-label="Upload resume"]')
+      .waitFor({ state: "attached", timeout: 45000 });
+
+    const persisted = await page.waitForFunction(filename => {
+      const visible = element => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity || 1) > 0 &&
+          rect.width > 0 &&
+          rect.height > 0;
+      };
+      const filenameVisible = Array.from(document.querySelectorAll("body *")).some(element =>
+        element.children.length === 0 &&
+        (element.textContent || "").trim() === filename &&
+        visible(element)
+      );
+      const body = (document.body && document.body.innerText || "");
+      return filenameVisible && /uploaded on/i.test(body);
+    }, fileInfo.name, { timeout: 30000 }).then(() => true).catch(() => false);
+
+    if (persisted) {
+      return {
+        confirmed: true,
+        method: "Profile reopened after upload; configured resume is persisted on Naukri",
+        filename: fileInfo.name
+      };
+    }
+
+    bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+  }
+
+  throw new Error(
+    "The file was selected, but Naukri did not show a verifiable upload confirmation or persisted resume entry. " +
+    "No success notification will be sent. Visible page text: " +
+    bodyText.replace(/\s+/g, " ").slice(0, 1800)
+  );
 }
 
 async function tryNormalProfileUpdate(page) {
@@ -588,101 +753,383 @@ async function tryNormalProfileUpdate(page) {
   return { attempted: false, resumeUploaded: false };
 }
 
-async function uploadResume(page, context) {
-  if (!RESUME_PATH || !fs.existsSync(RESUME_PATH)) {
-    throw new Error("RESUME_PATH does not exist: " + RESUME_PATH);
+async function deleteExistingResume(page, fileInfo) {
+  // Delete only the resume entry that contains the configured filename.
+  // Never click a generic Delete button elsewhere on the profile.
+  const filenameLocator = page.getByText(fileInfo.name, { exact: true }).first();
+  const filenameVisible = await filenameLocator.isVisible().catch(() => false);
+  if (!filenameVisible) {
+    log("No existing resume entry for " + fileInfo.name + " is visible; proceeding to upload.");
+    return false;
   }
 
+  const deleteIndex = await filenameLocator.evaluate(filenameElement => {
+    const isVisible = element => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        Number(style.opacity || 1) > 0 &&
+        rect.width > 0 &&
+        rect.height > 0;
+    };
+
+    let container = filenameElement;
+    for (let depth = 0; depth < 9 && container; depth++, container = container.parentElement) {
+      const candidates = Array.from(container.querySelectorAll('a,button,[role="button"]'));
+      const match = candidates.find(element => {
+        if (!isVisible(element)) return false;
+        const label = [
+          element.innerText,
+          element.textContent,
+          element.getAttribute("aria-label"),
+          element.getAttribute("title"),
+          element.getAttribute("data-tooltip")
+        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().toLowerCase();
+        return /(^|\b)(delete|remove)(\b|$)/i.test(label) ||
+          /deleteonetheme/i.test(label);
+      });
+      if (match) {
+        const all = Array.from(document.querySelectorAll('a,button,[role="button"]'));
+        return all.indexOf(match);
+      }
+    }
+    return -1;
+  }).catch(() => -1);
+
+  if (deleteIndex < 0) {
+    throw new Error(
+      "The existing resume " + fileInfo.name +
+      " is visible, but its own Delete control could not be identified safely. " +
+      "No other Delete button was clicked."
+    );
+  }
+
+  const deleteControl = page.locator('a,button,[role="button"]').nth(deleteIndex);
+  const deleteLabel = await deleteControl.evaluate(element => ({
+    tag: element.tagName,
+    text: (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim(),
+    ariaLabel: element.getAttribute("aria-label"),
+    title: element.getAttribute("title")
+  })).catch(() => ({}));
+  log("Deleting the existing configured resume using its adjacent control: " + JSON.stringify(deleteLabel));
+
+  const dialogHandler = async dialog => {
+    await dialog.accept().catch(() => {});
+  };
+  page.once("dialog", dialogHandler);
+
+  await deleteControl.click({ timeout: 8000 });
+
+  // Naukri may show an in-page confirmation dialog after the adjacent delete
+  // control is clicked. Confirm only inside a dialog that explicitly mentions
+  // deleting/removing the resume.
+  const dialog = page.getByRole("dialog").filter({ hasText: /delete|remove|resume/i }).first();
+  if (await dialog.isVisible({ timeout: 1800 }).catch(() => false)) {
+    const confirm = dialog.getByRole("button", { name: /^delete$/i }).first();
+    if (await confirm.isVisible().catch(() => false)) {
+      await confirm.click({ timeout: 5000 });
+    } else {
+      const yesDelete = dialog.getByRole("button", { name: /^(yes,?\s*)?delete$/i }).first();
+      if (await yesDelete.isVisible().catch(() => false)) {
+        await yesDelete.click({ timeout: 5000 });
+      } else {
+        throw new Error("Naukri displayed a resume deletion dialog, but no safe Delete confirmation button was found.");
+      }
+    }
+  }
+
+  await page.waitForFunction(filename => {
+    const visible = element => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        Number(style.opacity || 1) > 0 &&
+        rect.width > 0 &&
+        rect.height > 0;
+    };
+    return !Array.from(document.querySelectorAll("body *")).some(element =>
+      element.children.length === 0 &&
+      (element.textContent || "").trim() === filename &&
+      visible(element)
+    );
+  }, fileInfo.name, { timeout: 20000 });
+
+  page.removeListener("dialog", dialogHandler);
+  log("Existing resume entry was deleted from the Naukri profile.");
+  await page.waitForTimeout(1500);
+  return true;
+}
+
+async function logResumeReplacementDiagnostics(page) {
+  try {
+    const diagnostics = await page.evaluate(() => {
+      const describe = element => {
+        if (!element) return null;
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return {
+          tag: element.tagName,
+          id: element.id || null,
+          className: typeof element.className === "string" ? element.className.slice(0, 240) : null,
+          text: (element.innerText || element.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 240),
+          style: {
+            display: style.display,
+            visibility: style.visibility,
+            opacity: style.opacity,
+            pointerEvents: style.pointerEvents,
+            position: style.position,
+            zIndex: style.zIndex
+          },
+          rect: {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height)
+          }
+        };
+      };
+
+      const links = Array.from(document.querySelectorAll("a")).filter(link =>
+        (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase() === "yes, upload new"
+      ).map(link => {
+        const ancestors = [];
+        let current = link;
+        for (let depth = 0; depth < 6 && current; depth++, current = current.parentElement) {
+          ancestors.push(describe(current));
+        }
+        return {
+          link: describe(link),
+          outerHTML: link.outerHTML.slice(0, 1200),
+          ancestors
+        };
+      });
+
+      const input = document.querySelector('input#attachCV[type="file"][aria-label="Upload resume"]');
+      const resumeInput = input ? {
+        id: input.id,
+        type: input.type,
+        ariaLabel: input.getAttribute("aria-label"),
+        accept: input.getAttribute("accept"),
+        disabled: input.disabled,
+        fileCount: input.files ? input.files.length : 0,
+        parentChain: (() => {
+          const result = [];
+          let current = input;
+          for (let depth = 0; depth < 4 && current; depth++, current = current.parentElement) {
+            result.push(describe(current));
+          }
+          return result;
+        })()
+      } : null;
+
+      return {
+        capturedAt: new Date().toISOString(),
+        url: location.href,
+        title: document.title,
+        replacementLinks: links,
+        resumeInput
+      };
+    });
+
+    log("Resume replacement diagnostics: " + JSON.stringify(diagnostics));
+    if (DEBUG_PROFILE_UI) {
+      const screenshotPath = path.join(logDir, "resume-replacement-diagnostics-" + Date.now() + ".png");
+      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+      log("Resume replacement diagnostic screenshot saved: " + screenshotPath);
+    }
+  } catch (error) {
+    log("Could not capture resume replacement diagnostics: " + error.message);
+  }
+}
+
+async function confirmResumeReplacement(page) {
+  // The existing resume is deleted before upload, so a duplicate prompt should be unusual.
+  // Keep a short fallback window in case Naukri still displays one.
+  const deadline = Date.now() + 15000;
+  let lastDomMatchAt = 0;
+  let lastClickError = null;
+
+  while (Date.now() < deadline) {
+    if (page.isClosed()) {
+      throw new Error("Naukri page closed while waiting for resume replacement confirmation.");
+    }
+
+    // Match the exact link text after whitespace normalization. Do not rely
+    // solely on accessible-name computation: Naukri's SPA sometimes updates
+    // the anchor DOM before Playwright's accessibility snapshot catches up.
+    const candidateIndex = await page.locator("a").evaluateAll(links => {
+      return links.findIndex(link => {
+        const text = (link.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+        return text === "yes, upload new";
+      });
+    }).catch(() => -1);
+
+    if (candidateIndex >= 0) {
+      const candidate = page.locator("a").nth(candidateIndex);
+      const state = await candidate.evaluate(link => {
+        const style = window.getComputedStyle(link);
+        const rect = link.getBoundingClientRect();
+        return {
+          visible: style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            Number(style.opacity || 1) > 0 &&
+            rect.width > 0 &&
+            rect.height > 0,
+          text: (link.textContent || "").replace(/\s+/g, " ").trim()
+        };
+      }).catch(() => ({ visible: false, text: "" }));
+
+      if (state.visible) {
+        try {
+          await candidate.click({ timeout: 7000 });
+        } catch (clickError) {
+          log("Standard click on Naukri replacement link was blocked; trying the same rendered link directly: " + clickError.message);
+          await candidate.evaluate(element => element.click());
+        }
+
+        log("Clicked Naukri's explicit 'Yes, upload new' replacement link.");
+
+        // Confirm that the prompt has actually closed, not merely that a click
+        // was dispatched. This also prevents a false success on a stale dialog.
+        await page.waitForFunction(() => {
+          return !Array.from(document.querySelectorAll("a")).some(link => {
+            const text = (link.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+            if (text !== "yes, upload new") return false;
+            const style = window.getComputedStyle(link);
+            const rect = link.getBoundingClientRect();
+            return style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              Number(style.opacity || 1) > 0 &&
+              rect.width > 0 &&
+              rect.height > 0;
+          });
+        }, undefined, { timeout: 20000 });
+
+        log("Naukri's resume replacement prompt was dismissed after confirmation.");
+        return true;
+      }
+
+      // Record that the exact prompt exists in the DOM but is not yet rendered.
+      // This distinguishes delayed UI rendering from a missing prompt.
+      if (Date.now() - lastDomMatchAt > 15000) {
+        log("Naukri replacement link exists in the DOM but is not yet visibly rendered; continuing to wait.");
+        lastDomMatchAt = Date.now();
+      }
+    }
+
+    await page.waitForTimeout(750);
+  }
+
+  if (lastClickError) {
+    throw new Error("Resume replacement confirmation failed: " + lastClickError.message);
+  }
+
+  // Capture whether the expected link exists at all when the wait expires.
+  const finalState = await page.locator("a").evaluateAll(links => {
+    const matches = links.filter(link =>
+      (link.textContent || "").replace(/\s+/g, " ").trim().toLowerCase() === "yes, upload new"
+    );
+    return matches.map(link => {
+      const style = window.getComputedStyle(link);
+      const rect = link.getBoundingClientRect();
+      return {
+        visible: style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity || 1) > 0 &&
+          rect.width > 0 &&
+          rect.height > 0,
+        text: (link.textContent || "").replace(/\s+/g, " ").trim()
+      };
+    });
+  }).catch(() => []);
+
+  log("Naukri replacement prompt wait expired after 15 seconds. Matching link state: " + JSON.stringify(finalState));
+  await logResumeReplacementDiagnostics(page);
+  return false;
+}
+
+async function uploadResume(page, context) {
+  const fileInfo = getResumeFileInfo();
   let lastError = null;
 
   for (let attempt = 1; attempt <= UPLOAD_RETRIES; attempt++) {
     try {
       if (!page || page.isClosed()) {
         if (!context || contextIsClosed(context)) {
-          throw new Error("Cannot retry resume upload because the browser context is closed.");
+          throw new Error("Cannot upload resume because the browser context is closed.");
         }
         page = await createFreshPage(context);
+        await openProfile(page);
       }
 
       if (attempt > 1) {
-        log("Resume upload retry " + attempt + "/" + UPLOAD_RETRIES);
+        log("Resume delete-and-upload retry " + attempt + "/" + UPLOAD_RETRIES);
         await page.waitForTimeout(RETRY_DELAY_MS);
-
-        // openProfile() intentionally closes a timed-out page before retrying.
-        // If that happens, create a fresh page instead of reusing a closed one.
-        if (page.isClosed()) {
-          page = await createFreshPage(context);
-        }
-
+        if (page.isClosed()) page = await createFreshPage(context);
         await openProfile(page);
-
-        if (page.isClosed()) {
-          page = await createFreshPage(context);
-          await openProfile(page);
-        }
       }
 
-      let input = page.locator('input[type="file"]').first();
+      // Let Naukri manage replacement through its own upload workflow.
+      // This works whether the profile has no resume, the same resume filename,
+      // or a different existing resume. Do not delete first: deletion controls
+      // vary across Naukri UI versions and can remove the old resume before a
+      // replacement is safely uploaded.
+      const previousBodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
+      log("Starting Naukri's native resume upload/replacement flow without deleting the existing resume first.");
+      const uploadTarget = await clickNaukriResumeUploadControl(page);
+      await setResumeFile(uploadTarget);
 
-      if (await input.count()) {
-        await input.setInputFiles(RESUME_PATH);
-        await page.waitForTimeout(2000);
-        return;
-      }
-
-      const candidates = [
-        page.getByText(/Update resume/i).first(),
-        page.getByText(/Upload resume/i).first(),
-        page.getByRole("button", { name: /resume/i }).first(),
-        page.getByRole("link", { name: /resume/i }).first()
-      ];
-
-      let clicked = false;
-
-      for (const candidate of candidates) {
-        if (await candidate.isVisible({ timeout: 1500 }).catch(() => false)) {
-          clicked = true;
-
-          const fileChooserPromise = page
-            .waitForEvent("filechooser", { timeout: 10000 })
-            .catch(() => null);
-
-          await candidate.click({ timeout: 5000 }).catch(() => {});
-
-          const fileChooser = await fileChooserPromise;
-
-          if (fileChooser) {
-            await setResumeFile(page, fileChooser);
-            await page.waitForTimeout(2000);
-            return;
-          }
-
-          await page.waitForTimeout(2500);
-
-          if (await setResumeFile(page)) {
-            await page.waitForTimeout(2000);
-            return;
-          }
-        }
-      }
-
-      if (!clicked) {
-        // Give the page a little more time in case the resume control is
-        // rendered asynchronously after the profile page loads.
-        await page.waitForTimeout(3000);
-      }
-
-      lastError = new Error(
-        "Could not find Naukri resume upload control/input on attempt " +
-        attempt + "/" + UPLOAD_RETRIES
+      const replacementConfirmed = await confirmResumeReplacement(page);
+      const confirmation = await waitForResumeUploadConfirmation(
+        page,
+        fileInfo,
+        previousBodyText,
+        replacementConfirmed
       );
+
+      // Reload the profile and verify the uploaded resume is persisted on the
+      // server, not merely present in the current page's transient UI.
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(async error => {
+        log("Profile reload after upload did not reach DOMContentLoaded; waiting for resume entry instead: " + error.message);
+      });
+      await page.locator('input#attachCV[type="file"][aria-label="Upload resume"]')
+        .waitFor({ state: "attached", timeout: 45000 });
+
+      const persisted = await page.waitForFunction(filename => {
+        const visible = element => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            Number(style.opacity || 1) > 0 &&
+            rect.width > 0 &&
+            rect.height > 0;
+        };
+        const filenameVisible = Array.from(document.querySelectorAll("body *")).some(element =>
+          element.children.length === 0 &&
+          (element.textContent || "").trim() === filename &&
+          visible(element)
+        );
+        const body = (document.body && document.body.innerText || "").toLowerCase();
+        return filenameVisible && body.includes("uploaded on");
+      }, fileInfo.name, { timeout: 45000 }).then(() => true).catch(() => false);
+
+      if (!persisted) {
+        throw new Error("Naukri did not show the configured resume as a persisted profile entry after reloading the profile.");
+      }
+
+      const verified = {
+        confirmed: true,
+        filename: fileInfo.name,
+        method: "Deleted previous resume, uploaded configured file, and verified it remained on the profile after reload"
+      };
+      log("Naukri resume delete-and-upload CONFIRMED: " + verified.filename + " (verification: " + verified.method + ").");
+      return verified;
     } catch (error) {
       lastError = error;
-      log(
-        "Resume upload attempt " + attempt + "/" + UPLOAD_RETRIES +
-        " failed: " + error.message
-      );
-
+      log("Resume delete-and-upload attempt " + attempt + "/" + UPLOAD_RETRIES + " failed: " + error.message);
       if (page && page.isClosed() && context && !contextIsClosed(context)) {
         page = await createFreshPage(context).catch(() => page);
       }
@@ -694,29 +1141,19 @@ async function uploadResume(page, context) {
       path: path.join(logDir, "resume-upload-failure-" + Date.now() + ".png"),
       fullPage: true
     }).catch(() => {});
-
     const labels = await page.locator("button, a, input").evaluateAll(elements =>
-      elements
-        .map(el => ({
-          tag: el.tagName,
-          text: (el.innerText || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "").trim(),
-          type: el.getAttribute("type") || ""
-        }))
-        .filter(item => item.text || item.type === "file")
-        .slice(0, 80)
+      elements.map(el => ({
+        tag: el.tagName,
+        text: (el.innerText || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "").trim(),
+        type: el.getAttribute("type") || "",
+        accept: el.getAttribute("accept") || ""
+      })).filter(item => item.text || item.type === "file").slice(0, 80)
     ).catch(() => []);
-
-    if (labels.length) {
-      log("Resume upload UI snapshot: " + JSON.stringify(labels));
-    }
+    if (labels.length) log("Resume upload UI snapshot: " + JSON.stringify(labels));
   }
 
-  throw new Error(
-    "Could not find Naukri resume upload control/input after " +
-    UPLOAD_RETRIES +
-    " attempts. The Naukri UI may be temporarily unavailable or may have changed." +
-    (lastError ? " Last error: " + lastError.message : "")
-  );
+  throw new Error("Naukri resume delete-and-upload was NOT verified after " + UPLOAD_RETRIES +
+    " attempts. " + (lastError ? lastError.message : "Unknown upload error"));
 }
 
 async function launchBrowserContext() {
@@ -870,6 +1307,7 @@ async function recoverBrowserContext(currentContext) {
     process.on("SIGTERM", stop);
 
     while (true) {
+      const cycleStartedAt = Date.now();
       cycle++;
       writeHealth("RUNNING", cycle, { phase: "starting_cycle" });
       await flushPendingTelegramNotifications();
@@ -889,19 +1327,10 @@ async function recoverBrowserContext(currentContext) {
         log("Cycle " + cycle + ": opening profile");
         await openProfile(page);
 
-        const profileUpdateResult = await tryNormalProfileUpdate(page);
-        log(
-          "Cycle " + cycle + ": profile update " +
-          (profileUpdateResult.attempted ? "attempted" : "not available")
-        );
-
-        if (profileUpdateResult.resumeUploaded) {
-          log("Cycle " + cycle + ": resume upload action completed");
-        } else {
-          log("Cycle " + cycle + ": uploading resume");
-          await uploadResume(page, context);
-          log("Cycle " + cycle + ": resume upload action completed");
-        }
+        // Only use the explicit Naukri resume-upload entry point.
+        // A generic file input or file selection is not proof of a saved upload.
+        log("Cycle " + cycle + ": starting verified resume upload");
+        const uploadConfirmation = await uploadResume(page, context);
 
         failures = 0;
         writeHealth("SUCCESS", cycle, {
@@ -910,7 +1339,7 @@ async function recoverBrowserContext(currentContext) {
           next_cycle: cycle + 1,
           next_cycle_after_minutes: INTERVAL_MINUTES
         });
-        await sendTelegramSuccess(cycle);
+        await sendTelegramSuccess(cycle, uploadConfirmation);
       } catch (error) {
         const errorMessage = String(error && error.message || error);
         const contextClosedError =
@@ -1042,11 +1471,20 @@ async function recoverBrowserContext(currentContext) {
         }
       }
 
-      writeHealth("WAITING", cycle, { phase: "waiting", next_cycle: cycle + 1, next_cycle_after_minutes: INTERVAL_MINUTES });
-      log("Cycle " + cycle + ": waiting " + INTERVAL_MINUTES + " minutes");
-      await new Promise(resolve =>
-        setTimeout(resolve, INTERVAL_MINUTES * 60 * 1000)
+      const remainingIntervalMs = Math.max(
+        0,
+        INTERVAL_MINUTES * 60 * 1000 - (Date.now() - cycleStartedAt)
       );
+      writeHealth("WAITING", cycle, {
+        phase: "waiting",
+        next_cycle: cycle + 1,
+        next_cycle_after_minutes: Number((remainingIntervalMs / 60000).toFixed(2))
+      });
+      log("Cycle " + cycle + ": next cycle scheduled in " +
+        Math.ceil(remainingIntervalMs / 1000) + " seconds (five-minute start-to-start interval).");
+      if (remainingIntervalMs > 0) {
+        await new Promise(resolve => setTimeout(resolve, remainingIntervalMs));
+      }
     }
   } catch (error) {
     writeHealth("STARTUP_FAILED", 0, { phase: "startup", error: error.message });
