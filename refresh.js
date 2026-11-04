@@ -723,7 +723,7 @@ async function confirmResumeReplacement(page) {
             (link.innerText || "").trim().toLowerCase() === "yes, upload new" &&
             link.getClientRects().length > 0
           );
-        }, { timeout: 10000 }).then(() => true).catch(() => false);
+        }, undefined, { timeout: 10000 }).then(() => true).catch(() => false);
 
         if (!dismissed) {
           throw new Error("Naukri's 'Yes, upload new' prompt remained visible after clicking.");
