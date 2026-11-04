@@ -521,33 +521,60 @@ function getResumeFileInfo() {
   };
 }
 
-async function setResumeFile(fileChooser) {
+async function setResumeFile(uploadTarget) {
   const info = getResumeFileInfo();
-  if (!fileChooser) {
-    throw new Error("Naukri's resume file chooser did not open. Refusing to use an arbitrary file input.");
+  if (!uploadTarget) throw new Error("Naukri's identified resume upload input was not available.");
+
+  // Naukri's current UI identifies the resume input as #attachCV. Its visible
+  // dummy button overlays the input, so clicking the button is intercepted.
+  // setInputFiles on this exact input avoids pointer interaction and does not
+  // touch the separate profile-photo input.
+  if (uploadTarget.kind === "file-input") {
+    await uploadTarget.locator.setInputFiles(RESUME_PATH);
+  } else if (uploadTarget.kind === "file-chooser") {
+    await uploadTarget.chooser.setFiles(RESUME_PATH);
+  } else {
+    throw new Error("Unsupported Naukri resume upload target.");
   }
-  await fileChooser.setFiles(RESUME_PATH);
-  log("Resume file selected in Naukri's upload chooser: " + info.name + " (" + info.size_mb + " MB).");
+
+  log("Resume file supplied to Naukri's identified resume control: " +
+      info.name + " (" + info.size_mb + " MB).");
   return info;
 }
 
 async function clickNaukriResumeUploadControl(page) {
-  const candidates = [
-    page.getByText(/^Upload resume$/i).first(),
-    page.getByRole("button", { name: /^Upload resume$/i }).first(),
-    page.getByRole("link", { name: /^Upload resume$/i }).first(),
-    page.getByText(/Already have a resume\?\s*Upload resume/i).first(),
-    page.getByRole("link", { name: /^Upload$/i }).first()
+  const selectors = [
+    'input#attachCV[type="file"][aria-label="Upload resume"]',
+    'input[type="file"][aria-label="Upload resume"]'
   ];
-  for (const control of candidates) {
-    if (await control.isVisible({ timeout: 1200 }).catch(() => false)) {
-      const chooserPromise = page.waitForEvent("filechooser", { timeout: 10000 }).catch(() => null);
-      await control.click({ timeout: 5000 });
-      const chooser = await chooserPromise;
-      if (chooser) return chooser;
+
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+    if (await locator.count()) {
+      if (!(await locator.isEnabled().catch(() => false))) {
+        throw new Error("Naukri's identified resume input is disabled: " + selector);
+      }
+      log("Identified Naukri resume input using selector: " + selector);
+      return { kind: "file-input", locator };
     }
   }
-  throw new Error("Could not open Naukri's visible 'Upload resume' control. Refusing to use the first generic file input.");
+
+  // Strict fallback: use only the explicit resume-upload text and a real
+  // file chooser. Do not click generic buttons or arbitrary file inputs.
+  const control = page.getByText(/^Upload resume$/i).first();
+  if (await control.isVisible({ timeout: 1200 }).catch(() => false)) {
+    const chooserPromise = page.waitForEvent("filechooser", { timeout: 10000 }).catch(() => null);
+    await control.click({ timeout: 5000 }).catch(error => {
+      log("Visible Upload resume text click did not open chooser: " + error.message);
+    });
+    const chooser = await chooserPromise;
+    if (chooser) return { kind: "file-chooser", chooser };
+  }
+
+  throw new Error(
+    "Naukri's specific resume input (#attachCV with aria-label Upload resume) " +
+    "and its associated file chooser were not found. No unrelated file input was used."
+  );
 }
 
 async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText = "") {
@@ -666,8 +693,16 @@ async function uploadResume(page, context) {
         await openProfile(page);
       }
       const previousBodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
-      const chooser = await clickNaukriResumeUploadControl(page);
-      await setResumeFile(chooser);
+      const uploadTarget = await clickNaukriResumeUploadControl(page);
+      await setResumeFile(uploadTarget);
+
+      // Naukri may ask whether to replace the existing resume.
+      const replaceConfirmation = page.getByText(/^Yes, upload new$/i).first();
+      if (await replaceConfirmation.isVisible({ timeout: 2500 }).catch(() => false)) {
+        await replaceConfirmation.click({ timeout: 5000 });
+        log("Confirmed Naukri's explicit 'Yes, upload new' prompt.");
+      }
+
       const confirmation = await waitForResumeUploadConfirmation(page, fileInfo, previousBodyText);
       log("Naukri resume upload CONFIRMED: " + confirmation.filename +
           " (verification: " + confirmation.method + ").");
