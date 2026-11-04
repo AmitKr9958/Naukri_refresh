@@ -1,13 +1,13 @@
 # Runs Naukri Refresh from Windows Task Scheduler.
-# The PowerShell launcher stays hidden, but headed Chromium is intentionally visible on the desktop.
+# Keep Chromium headed for Naukri compatibility, but hide its top-level window
+# so the automation runs without a visible browser or taskbar button.
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $repo
 
-# Naukri profile/resume controls are not reliably available in headless Chromium.
-# Force headed mode for the automation process. The window is still started
-# shown as a normal desktop window; the Task Scheduler PowerShell window remains hidden.
+# Keep the Chromium engine headed because Naukri's upload controls are not
+# reliably available in headless mode. The top-level window is hidden below.
 # Do not let .env HEADLESS=true override this.
 $env:HEADLESS = "false"
 # Keep profile screenshots and verbose UI diagnostics opt-in; profile pages contain personal data.
@@ -31,9 +31,9 @@ function Write-LauncherLog {
 }
 Write-LauncherLog ("Launcher started. PID=$PID; repo=$repo; Node=" + (Get-Command node.exe -ErrorAction SilentlyContinue).Source)
 Write-LauncherLog "Stage 1: direct file logging initialized."
-Write-LauncherLog "Stage 1b: HEADLESS=false; Chromium will be visible on the desktop."
+Write-LauncherLog "Stage 1b: Chromium uses headed engine mode but its desktop window will be hidden."
 
-Write-LauncherLog "Stage 2: Chromium window will be explicitly restored and maximized in the interactive desktop."
+Write-LauncherLog "Stage 2: Chromium top-level window will be hidden from the interactive desktop."
 
 Write-LauncherLog "Stage 4: resolving profile and Node paths."
 $profileMarker = [IO.Path]::GetFullPath((Join-Path $repo "naukri-browser-profile"))
@@ -255,7 +255,7 @@ function Start-NaukriRefreshWithRecovery {
         Write-Host "Starting Naukri Refresh attempt $attempt/$MaxAttempts."
         if (-not (Reset-NaukriProfileLocks)) { Start-Sleep -Seconds 5; continue }
         try {
-            # Keep the Node console hidden. Show-NaukriBrowserWindows explicitly
+            # Keep the Node console hidden. Hide-NaukriBrowserWindows explicitly
             # restores and maximizes only Chromium's top-level window in the
             # interactive desktop session.
             $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
@@ -309,8 +309,9 @@ function Start-NaukriRefreshWithRecovery {
     }
     throw "Naukri Refresh could not be started after clean startup attempts."
 }
-# Hide Chromium top-level windows rather than merely moving them off-screen.
-# Keep headed Chromium (needed by Naukri) but remove its taskbar button.
+# Hide Chromium top-level windows (not merely move them off-screen).
+# Keep headed Chromium for Naukri compatibility, but remove the visible window
+# and taskbar button while Playwright continues to control the browser.
 $script:NaukriWindowApiReady = $false
 try {
     if (-not ("NaukriWindowHider" -as [type])) {
@@ -333,10 +334,9 @@ public static class NaukriWindowHider {
 
 $script:ShownNaukriWindowPids = [System.Collections.Generic.HashSet[int]]::new()
 
-function Show-NaukriBrowserWindows {
-    # Node is launched hidden so no console window appears. Explicitly restore
-    # and maximize each new Chromium top-level window once; do not fight a
-    # user's later minimize action on every launcher polling cycle.
+function Hide-NaukriBrowserWindows {
+    # Node is launched hidden. Hide each Chromium top-level window as soon as
+    # it appears; do not restore or maximize it on the desktop.
     if (-not $script:NaukriWindowApiReady) { return }
 
     try {
@@ -354,8 +354,9 @@ function Show-NaukriBrowserWindows {
             [uint32]$windowPid = 0
             [void][NaukriWindowHider]::GetWindowThreadProcessId($hWnd, [ref]$windowPid)
             if ($targetPids.Contains([int]$windowPid) -and $shownPids.Add([int]$windowPid)) {
-                # SW_SHOWMAXIMIZED = 3; this also restores windows launched with SW_HIDE.
-                [void][NaukriWindowHider]::ShowWindow($hWnd, 3)
+                # SW_HIDE = 0. Chromium remains running and Playwright can
+                # continue interacting with its page without showing a window.
+                [void][NaukriWindowHider]::ShowWindow($hWnd, 0)
             }
             return $true
         }.GetNewClosure()
@@ -367,7 +368,7 @@ function Show-NaukriBrowserWindows {
 }
 
 Write-LauncherLog "Stage 6: entering launcher main loop."
-Write-LauncherLog "Optional sleep-prevention helper skipped; continuing without changing Windows sleep settings."
+Write-LauncherLog "Chromium windows are hidden. Periodic wake is handled by the separate Naukri Refresh Wake Timer task; Windows/device firmware must support wake timers."
 
 $exitCode = 1
 
@@ -420,16 +421,16 @@ try {
             Write-Host "Could not clean stale refresh.js processes: $($_.Exception.Message)"
         }
 
-        Show-NaukriBrowserWindows
+        Hide-NaukriBrowserWindows
         try {
             Write-LauncherLog "Main loop: starting refresh.js recovery routine."
             $nodeProcess = Start-NaukriRefreshWithRecovery -MaxAttempts 5
             while (-not $nodeProcess.HasExited) {
-                Show-NaukriBrowserWindows
+                Hide-NaukriBrowserWindows
                 Start-Sleep -Milliseconds 750
                 try { $nodeProcess.Refresh() } catch {}
             }
-            Show-NaukriBrowserWindows
+            Hide-NaukriBrowserWindows
             $exitCode = $nodeProcess.ExitCode
 
             # refresh.js writes this terminal state only after the configured
