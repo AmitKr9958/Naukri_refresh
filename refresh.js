@@ -1196,7 +1196,7 @@ async function launchBrowserContext() {
   // - Safer Chromium args that avoid first-run, default-browser, and recent
   //   DevTools-debugging restrictions that can leave the process alive while
   //   launchPersistentContext never returns.
-  // - Off-screen / minimized flags remain, but are no longer the only args.
+  // - Chromium opens as a normal visible desktop window for interactive troubleshooting.
   // - Clear distinction between true profile locks and generic launch timeouts.
   const launchTimeoutMs = readPositiveNumberEnv("BROWSER_LAUNCH_TIMEOUT_MS", 90000, 5000, true);
   let executablePath = null;
@@ -1210,9 +1210,7 @@ async function launchBrowserContext() {
     "--disable-blink-features=AutomationControlled",
     "--no-first-run",
     "--no-default-browser-check",
-    "--disable-features=DevToolsDebuggingRestrictions",
-    "--start-minimized",
-    "--window-position=-32000,-32000"
+    "--disable-features=DevToolsDebuggingRestrictions"
   ];
 
   log(
@@ -1236,9 +1234,8 @@ async function launchBrowserContext() {
       timeout: launchTimeoutMs,
       viewport: { width: 1440, height: 900 },
       // Naukri currently requires headed Chromium. Keep the real browser engine
-      // active, but start its window off-screen so no Chromium window is visible
-      // during normal background operation. File uploads are handled by
-      // Playwright's filechooser API, so no native file-picker window is needed.
+      // active and visible on the desktop for interactive troubleshooting.
+      // File uploads are handled by Playwright filechooser API.
       args: launchArgs
     };
     if (executablePath) {
