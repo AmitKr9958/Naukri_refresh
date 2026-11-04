@@ -585,7 +585,7 @@ async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText 
     /resume upload successful/i,
     /file uploaded successfully/i
   ];
-  const deadline = Date.now() + 25000;
+  const deadline = Date.now() + 40000;
   let bodyText = "";
   while (Date.now() < deadline) {
     if (page.isClosed()) throw new Error("Naukri page closed before upload confirmation.");
@@ -613,7 +613,7 @@ async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText 
     await page.waitForTimeout(1000);
   }
   throw new Error(
-    "The file was selected, but Naukri did not show a verifiable upload confirmation within 25 seconds. " +
+    "The file was selected, but Naukri did not show a verifiable upload confirmation within 40 seconds. " +
     "No success notification will be sent. Visible page text: " +
     bodyText.replace(/\s+/g, " ").slice(0, 1800)
   );
@@ -688,7 +688,9 @@ async function tryNormalProfileUpdate(page) {
 }
 
 async function confirmResumeReplacement(page) {
-  const deadline = Date.now() + 7000;
+  // Naukri can render the replacement prompt well after the file input changes.
+  // Keep polling long enough for its asynchronous upload/duplicate check to finish.
+  const deadline = Date.now() + 35000;
   let lastClickError = null;
 
   while (Date.now() < deadline) {
@@ -696,8 +698,7 @@ async function confirmResumeReplacement(page) {
       throw new Error("Naukri page closed while waiting for resume replacement confirmation.");
     }
 
-    // Naukri renders this confirmation as a link. Prefer its accessible
-    // role/name, then use a narrowly scoped anchor fallback.
+    // First use Playwright's accessible locator.
     let confirmation = page.getByRole("link", {
       name: "Yes, upload new",
       exact: true
@@ -705,25 +706,56 @@ async function confirmResumeReplacement(page) {
 
     let visible = await confirmation.isVisible().catch(() => false);
 
+    // Naukri sometimes exposes the anchor in the DOM before its accessible
+    // name/visibility state is stable. Find only the exact, rendered link.
     if (!visible) {
-      confirmation = page.locator("a").filter({
-        hasText: /^\s*Yes, upload new\s*$/i
-      }).first();
-      visible = await confirmation.isVisible().catch(() => false);
+      const visibleIndex = await page.locator("a").evaluateAll(links => {
+        return links.findIndex(link => {
+          const text = (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
+          if (text !== "yes, upload new") return false;
+          const style = window.getComputedStyle(link);
+          const rect = link.getBoundingClientRect();
+          return style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            Number(style.opacity || 1) > 0 &&
+            rect.width > 0 &&
+            rect.height > 0;
+        });
+      }).catch(() => -1);
+
+      if (visibleIndex >= 0) {
+        confirmation = page.locator("a").nth(visibleIndex);
+        visible = true;
+      }
     }
 
     if (visible) {
       try {
-        await confirmation.click({ timeout: 5000 });
+        try {
+          await confirmation.click({ timeout: 5000 });
+        } catch (clickError) {
+          // The confirmation is an explicit, visible Naukri link. If an
+          // animation/overlay intercepts Playwright's pointer action, invoke
+          // the click on that same rendered anchor only.
+          log("Standard click on replacement link was blocked; trying its rendered anchor: " + clickError.message);
+          await confirmation.evaluate(element => element.click());
+        }
+
         log("Clicked Naukri's explicit 'Yes, upload new' replacement link.");
 
         const dismissed = await page.waitForFunction(() => {
-          const links = Array.from(document.querySelectorAll("a"));
-          return !links.some(link =>
-            (link.innerText || "").trim().toLowerCase() === "yes, upload new" &&
-            link.getClientRects().length > 0
-          );
-        }, undefined, { timeout: 10000 }).then(() => true).catch(() => false);
+          return !Array.from(document.querySelectorAll("a")).some(link => {
+            const text = (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
+            if (text !== "yes, upload new") return false;
+            const style = window.getComputedStyle(link);
+            const rect = link.getBoundingClientRect();
+            return style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              Number(style.opacity || 1) > 0 &&
+              rect.width > 0 &&
+              rect.height > 0;
+          });
+        }, undefined, { timeout: 15000 }).then(() => true).catch(() => false);
 
         if (!dismissed) {
           throw new Error("Naukri's 'Yes, upload new' prompt remained visible after clicking.");
@@ -744,7 +776,7 @@ async function confirmResumeReplacement(page) {
     throw new Error("Resume replacement confirmation failed: " + lastClickError.message);
   }
 
-  log("Naukri did not display a resume replacement prompt; continuing with normal upload confirmation.");
+  log("Naukri did not display a visible resume replacement prompt within 35 seconds.");
   return false;
 }
 
