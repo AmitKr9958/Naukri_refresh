@@ -10,6 +10,7 @@ Set-Location $repo
 # reliably available in headless mode. The top-level window is hidden below.
 # Do not let .env HEADLESS=true override this.
 $env:HEADLESS = "false"
+$env:HIDE_BROWSER_WINDOW = "true"
 # Keep profile screenshots and verbose UI diagnostics opt-in; profile pages contain personal data.
 # Set DEBUG_PROFILE_UI=true explicitly in the process environment only when troubleshooting.
 
@@ -344,7 +345,7 @@ function Hide-NaukriBrowserWindows {
         if (-not $profileProcesses) { return }
 
         $targetPids = [System.Collections.Generic.HashSet[int]]::new()
-        $hiddenPids = $script:ShownNaukriWindowPids
+        $hiddenPids = $script:HiddenNaukriWindowPids
         foreach ($processInfo in $profileProcesses) {
             [void]$targetPids.Add([int]$processInfo.ProcessId)
         }
@@ -353,7 +354,8 @@ function Hide-NaukriBrowserWindows {
             param([IntPtr]$hWnd, [IntPtr]$lParam)
             [uint32]$windowPid = 0
             [void][NaukriWindowHider]::GetWindowThreadProcessId($hWnd, [ref]$windowPid)
-            if ($targetPids.Contains([int]$windowPid) -and $shownPids.Add([int]$windowPid)) {
+            if ($targetPids.Contains([int]$windowPid)) {
+                [void]$hiddenPids.Add([int]$windowPid)
                 # SW_HIDE = 0. Chromium remains running and Playwright can
                 # continue interacting with its page without showing a window.
                 [void][NaukriWindowHider]::ShowWindow($hWnd, 0)
