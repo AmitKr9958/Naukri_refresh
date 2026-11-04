@@ -33,7 +33,7 @@ $wakeArgument = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'
 $wakeAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $wakeArgument
 $wakeAt = (Get-Date).AddMinutes(1)
 $wakeTrigger = New-ScheduledTaskTrigger -Once -At $wakeAt -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 365)
-$wakeSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+$wakeSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -ExecutionTimeLimit (New-TimeSpan -Minutes 3) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $wakeTaskName -Action $wakeAction -Trigger $wakeTrigger -Settings $wakeSettings -Principal $principal -Force | Out-Null
 
 Write-Host ""
