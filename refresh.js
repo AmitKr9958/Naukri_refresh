@@ -913,7 +913,7 @@ async function deleteExistingResume(page, fileInfo) {
       log("No resume deletion confirmation popup appeared; verifying whether deletion completed immediately.");
     }
 
-    await page.waitForFunction(filename => {
+    const deletionDisappeared = await page.waitForFunction(filename => {
       const visible = element => {
         const style = window.getComputedStyle(element);
         const rect = element.getBoundingClientRect();
@@ -929,7 +929,38 @@ async function deleteExistingResume(page, fileInfo) {
         (element.textContent || "").trim() === filename &&
         visible(element)
       );
-    }, existingEntry.filename, { timeout: 20000 });
+    }, existingEntry.filename, { timeout: 12000 }).then(() => true).catch(() => false);
+
+    if (!deletionDisappeared) {
+      log("Naukri did not remove the old resume entry from the current page within 12 seconds. Reopening the profile to check server state before deciding whether to retry deletion.");
+      await page.goto(PROFILE_URL, { waitUntil: "commit", timeout: 30000 }).catch(error => {
+        log("Profile navigation after deletion check did not complete: " + error.message);
+      });
+      await page.locator('input#attachCV[type="file"][aria-label="Upload resume"]')
+        .waitFor({ state: "attached", timeout: 45000 });
+
+      const oldEntryStillPresent = await page.evaluate(filename => {
+        const visible = element => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            Number(style.opacity || 1) > 0 &&
+            rect.width > 0 &&
+            rect.height > 0;
+        };
+        return Array.from(document.querySelectorAll("body *")).some(element =>
+          element.children.length === 0 &&
+          (element.textContent || "").trim() === filename &&
+          visible(element)
+        );
+      }, existingEntry.filename).catch(() => true);
+
+      if (oldEntryStillPresent) {
+        log("Existing resume is still present after profile reload. It will not be deleted repeatedly; proceeding to Naukri's native replacement flow.");
+        return false;
+      }
+    }
   } finally {
     page.removeListener("dialog", dialogHandler);
   }
@@ -1069,9 +1100,9 @@ async function confirmResumeReplacement(page) {
 
         // Confirm that the prompt has actually closed, not merely that a click
         // was dispatched. This also prevents a false success on a stale dialog.
-        await page.waitForFunction(() => {
+        const promptDismissed = await page.waitForFunction(() => {
           return !Array.from(document.querySelectorAll("a")).some(link => {
-            const text = (link.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+            const text = (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
             if (text !== "yes, upload new") return false;
             const style = window.getComputedStyle(link);
             const rect = link.getBoundingClientRect();
@@ -1081,9 +1112,13 @@ async function confirmResumeReplacement(page) {
               rect.width > 0 &&
               rect.height > 0;
           });
-        }, undefined, { timeout: 20000 });
+        }, undefined, { timeout: 10000 }).then(() => true).catch(() => false);
 
-        log("Naukri's resume replacement prompt was dismissed after confirmation.");
+        if (promptDismissed) {
+          log("Naukri's resume replacement prompt was dismissed after confirmation.");
+        } else {
+          log("Replacement confirmation click was dispatched, but Naukri retained a stale replacement link in the DOM. Continuing to server-persistence verification.");
+        }
         return true;
       }
 
