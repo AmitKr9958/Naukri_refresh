@@ -585,7 +585,7 @@ async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText 
     /resume upload successful/i,
     /file uploaded successfully/i
   ];
-  const deadline = Date.now() + 40000;
+  const deadline = Date.now() + 60000;
   let bodyText = "";
   while (Date.now() < deadline) {
     if (page.isClosed()) throw new Error("Naukri page closed before upload confirmation.");
