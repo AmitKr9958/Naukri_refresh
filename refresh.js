@@ -968,7 +968,7 @@ async function deleteExistingResume(page, fileInfo, recheckedAfterReload = false
         return elements.filter(element =>
           element.children.length === 0 &&
           visible(element) &&
-          pattern.test((element.textContent || "").trim())
+          filenamePattern.test((element.textContent || "").trim())
         ).map(element => (element.textContent || "").trim()).slice(0, 10);
       }).catch(() => []);
       throw new Error(
