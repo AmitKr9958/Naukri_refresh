@@ -295,17 +295,15 @@ async function flushPendingTelegramNotifications() {
   }
 }
 
-async function sendTelegramSuccess(cycle) {
+async function sendTelegramSuccess(cycle, confirmation) {
   const message =
-    "🟢 Naukri Automation — SUCCESS\n\n" +
+    "🟢 Naukri Automation — RESUME UPLOAD CONFIRMED\n\n" +
     "Run: #" + cycle + "\n" +
-    "Profile update: Completed/attempted\n" +
-    "Resume upload: Completed successfully\n" +
+    "Resume: " + confirmation.filename + "\n" +
+    "Verification: " + confirmation.method + "\n" +
     "Interval: " + INTERVAL_MINUTES + " minutes\n" +
-    "Time: " +
-    new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + "\n\n" +
-    "Status: Running normally";
-
+    "Time: " + new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + "\n\n" +
+    "Status: Naukri displayed an upload confirmation";
   await sendTelegramMessage(message, "success");
 }
 
@@ -500,24 +498,84 @@ async function createFreshPage(context) {
   return await context.newPage();
 }
 
-async function setResumeFile(page, fileChooser = null) {
+const MAX_RESUME_BYTES = readPositiveNumberEnv("MAX_RESUME_BYTES", 2 * 1024 * 1024, 1024, true);
+
+function getResumeFileInfo() {
   if (!RESUME_PATH || !fs.existsSync(RESUME_PATH)) {
     throw new Error("RESUME_PATH does not exist: " + RESUME_PATH);
   }
-
-  if (fileChooser) {
-    await fileChooser.setFiles(RESUME_PATH);
-    return true;
+  const stat = fs.statSync(RESUME_PATH);
+  if (!stat.isFile()) throw new Error("RESUME_PATH is not a file: " + RESUME_PATH);
+  if (stat.size > MAX_RESUME_BYTES) {
+    throw new Error(
+      "Resume file exceeds Naukri's 2 MB limit shown on the profile. " +
+      "File: " + path.basename(RESUME_PATH) +
+      "; current size: " + (stat.size / (1024 * 1024)).toFixed(2) + " MB. " +
+      "Compress the DOCX or point RESUME_PATH to a file no larger than 2 MB."
+    );
   }
+  return {
+    name: path.basename(RESUME_PATH),
+    size: stat.size,
+    size_mb: Number((stat.size / (1024 * 1024)).toFixed(2))
+  };
+}
 
-  const input = page.locator('input[type="file"]').first();
-
-  if (await input.count()) {
-    await input.setInputFiles(RESUME_PATH);
-    return true;
+async function setResumeFile(fileChooser) {
+  const info = getResumeFileInfo();
+  if (!fileChooser) {
+    throw new Error("Naukri's resume file chooser did not open. Refusing to use an arbitrary file input.");
   }
+  await fileChooser.setFiles(RESUME_PATH);
+  log("Resume file selected in Naukri's upload chooser: " + info.name + " (" + info.size_mb + " MB).");
+  return info;
+}
 
-  return false;
+async function clickNaukriResumeUploadControl(page) {
+  const candidates = [
+    page.getByText(/^Upload resume$/i).first(),
+    page.getByRole("button", { name: /^Upload resume$/i }).first(),
+    page.getByRole("link", { name: /^Upload resume$/i }).first(),
+    page.getByText(/Already have a resume\?\s*Upload resume/i).first(),
+    page.getByRole("link", { name: /^Upload$/i }).first()
+  ];
+  for (const control of candidates) {
+    if (await control.isVisible({ timeout: 1200 }).catch(() => false)) {
+      const chooserPromise = page.waitForEvent("filechooser", { timeout: 10000 }).catch(() => null);
+      await control.click({ timeout: 5000 });
+      const chooser = await chooserPromise;
+      if (chooser) return chooser;
+    }
+  }
+  throw new Error("Could not open Naukri's visible 'Upload resume' control. Refusing to use the first generic file input.");
+}
+
+async function waitForResumeUploadConfirmation(page, fileInfo) {
+  const patterns = [
+    /resume uploaded successfully/i,
+    /resume has been uploaded/i,
+    /resume updated successfully/i,
+    /successfully uploaded.*resume/i,
+    /resume upload successful/i,
+    /file uploaded successfully/i
+  ];
+  const deadline = Date.now() + 25000;
+  let bodyText = "";
+  while (Date.now() < deadline) {
+    if (page.isClosed()) throw new Error("Naukri page closed before upload confirmation.");
+    bodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
+    const match = patterns.find(pattern => pattern.test(bodyText));
+    if (match) return { confirmed: true, method: "Naukri success message", filename: fileInfo.name };
+    if (bodyText.toLowerCase().includes(fileInfo.name.toLowerCase())) {
+      return { confirmed: true, method: "Uploaded filename displayed on profile", filename: fileInfo.name };
+    }
+    await page.waitForTimeout(1000);
+  }
+  throw new Error(
+    "The file was selected, but Naukri did not show a verifiable upload confirmation within 25 seconds. " +
+    "No success notification will be sent. Visible page text: " +
+    bodyText.replace(/\s+/g, " ").slice(0, 1800)
+  );
 }
 
 async function tryNormalProfileUpdate(page) {
@@ -589,134 +647,54 @@ async function tryNormalProfileUpdate(page) {
 }
 
 async function uploadResume(page, context) {
-  if (!RESUME_PATH || !fs.existsSync(RESUME_PATH)) {
-    throw new Error("RESUME_PATH does not exist: " + RESUME_PATH);
-  }
-
+  const fileInfo = getResumeFileInfo();
   let lastError = null;
-
   for (let attempt = 1; attempt <= UPLOAD_RETRIES; attempt++) {
     try {
       if (!page || page.isClosed()) {
         if (!context || contextIsClosed(context)) {
-          throw new Error("Cannot retry resume upload because the browser context is closed.");
+          throw new Error("Cannot upload resume because the browser context is closed.");
         }
         page = await createFreshPage(context);
+        await openProfile(page);
       }
-
       if (attempt > 1) {
         log("Resume upload retry " + attempt + "/" + UPLOAD_RETRIES);
         await page.waitForTimeout(RETRY_DELAY_MS);
-
-        // openProfile() intentionally closes a timed-out page before retrying.
-        // If that happens, create a fresh page instead of reusing a closed one.
-        if (page.isClosed()) {
-          page = await createFreshPage(context);
-        }
-
+        if (page.isClosed()) page = await createFreshPage(context);
         await openProfile(page);
-
-        if (page.isClosed()) {
-          page = await createFreshPage(context);
-          await openProfile(page);
-        }
       }
-
-      let input = page.locator('input[type="file"]').first();
-
-      if (await input.count()) {
-        await input.setInputFiles(RESUME_PATH);
-        await page.waitForTimeout(2000);
-        return;
-      }
-
-      const candidates = [
-        page.getByText(/Update resume/i).first(),
-        page.getByText(/Upload resume/i).first(),
-        page.getByRole("button", { name: /resume/i }).first(),
-        page.getByRole("link", { name: /resume/i }).first()
-      ];
-
-      let clicked = false;
-
-      for (const candidate of candidates) {
-        if (await candidate.isVisible({ timeout: 1500 }).catch(() => false)) {
-          clicked = true;
-
-          const fileChooserPromise = page
-            .waitForEvent("filechooser", { timeout: 10000 })
-            .catch(() => null);
-
-          await candidate.click({ timeout: 5000 }).catch(() => {});
-
-          const fileChooser = await fileChooserPromise;
-
-          if (fileChooser) {
-            await setResumeFile(page, fileChooser);
-            await page.waitForTimeout(2000);
-            return;
-          }
-
-          await page.waitForTimeout(2500);
-
-          if (await setResumeFile(page)) {
-            await page.waitForTimeout(2000);
-            return;
-          }
-        }
-      }
-
-      if (!clicked) {
-        // Give the page a little more time in case the resume control is
-        // rendered asynchronously after the profile page loads.
-        await page.waitForTimeout(3000);
-      }
-
-      lastError = new Error(
-        "Could not find Naukri resume upload control/input on attempt " +
-        attempt + "/" + UPLOAD_RETRIES
-      );
+      const chooser = await clickNaukriResumeUploadControl(page);
+      await setResumeFile(chooser);
+      const confirmation = await waitForResumeUploadConfirmation(page, fileInfo);
+      log("Naukri resume upload CONFIRMED: " + confirmation.filename +
+          " (verification: " + confirmation.method + ").");
+      return confirmation;
     } catch (error) {
       lastError = error;
-      log(
-        "Resume upload attempt " + attempt + "/" + UPLOAD_RETRIES +
-        " failed: " + error.message
-      );
-
+      log("Resume upload attempt " + attempt + "/" + UPLOAD_RETRIES + " failed: " + error.message);
       if (page && page.isClosed() && context && !contextIsClosed(context)) {
         page = await createFreshPage(context).catch(() => page);
       }
     }
   }
-
   if (DEBUG_PROFILE_UI && page && !page.isClosed()) {
     await page.screenshot({
       path: path.join(logDir, "resume-upload-failure-" + Date.now() + ".png"),
       fullPage: true
     }).catch(() => {});
-
     const labels = await page.locator("button, a, input").evaluateAll(elements =>
-      elements
-        .map(el => ({
-          tag: el.tagName,
-          text: (el.innerText || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "").trim(),
-          type: el.getAttribute("type") || ""
-        }))
-        .filter(item => item.text || item.type === "file")
-        .slice(0, 80)
+      elements.map(el => ({
+        tag: el.tagName,
+        text: (el.innerText || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "").trim(),
+        type: el.getAttribute("type") || "",
+        accept: el.getAttribute("accept") || ""
+      })).filter(item => item.text || item.type === "file").slice(0, 80)
     ).catch(() => []);
-
-    if (labels.length) {
-      log("Resume upload UI snapshot: " + JSON.stringify(labels));
-    }
+    if (labels.length) log("Resume upload UI snapshot: " + JSON.stringify(labels));
   }
-
-  throw new Error(
-    "Could not find Naukri resume upload control/input after " +
-    UPLOAD_RETRIES +
-    " attempts. The Naukri UI may be temporarily unavailable or may have changed." +
-    (lastError ? " Last error: " + lastError.message : "")
-  );
+  throw new Error("Naukri resume upload was NOT verified after " + UPLOAD_RETRIES +
+    " attempts. " + (lastError ? lastError.message : "Unknown upload error"));
 }
 
 async function launchBrowserContext() {
@@ -889,19 +867,10 @@ async function recoverBrowserContext(currentContext) {
         log("Cycle " + cycle + ": opening profile");
         await openProfile(page);
 
-        const profileUpdateResult = await tryNormalProfileUpdate(page);
-        log(
-          "Cycle " + cycle + ": profile update " +
-          (profileUpdateResult.attempted ? "attempted" : "not available")
-        );
-
-        if (profileUpdateResult.resumeUploaded) {
-          log("Cycle " + cycle + ": resume upload action completed");
-        } else {
-          log("Cycle " + cycle + ": uploading resume");
-          await uploadResume(page, context);
-          log("Cycle " + cycle + ": resume upload action completed");
-        }
+        // Only use the explicit Naukri resume-upload entry point.
+        // A generic file input or file selection is not proof of a saved upload.
+        log("Cycle " + cycle + ": starting verified resume upload");
+        const uploadConfirmation = await uploadResume(page, context);
 
         failures = 0;
         writeHealth("SUCCESS", cycle, {
@@ -910,7 +879,7 @@ async function recoverBrowserContext(currentContext) {
           next_cycle: cycle + 1,
           next_cycle_after_minutes: INTERVAL_MINUTES
         });
-        await sendTelegramSuccess(cycle);
+        await sendTelegramSuccess(cycle, uploadConfirmation);
       } catch (error) {
         const errorMessage = String(error && error.message || error);
         const contextClosedError =
