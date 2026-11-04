@@ -303,7 +303,7 @@ async function sendTelegramSuccess(cycle, confirmation) {
     "Verification: " + confirmation.method + "\n" +
     "Interval: " + INTERVAL_MINUTES + " minutes\n" +
     "Time: " + new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + "\n\n" +
-    "Status: Naukri displayed an upload confirmation";
+    "Status: Configured resume entry verified on the Naukri profile after reload";
   await sendTelegramMessage(message, "success");
 }
 
@@ -873,7 +873,7 @@ async function logResumeReplacementDiagnostics(page) {
           tag: element.tagName,
           id: element.id || null,
           className: typeof element.className === "string" ? element.className.slice(0, 240) : null,
-          text: (element.innerText || element.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 240),
+          text: element.tagName === "BODY" ? "[redacted]" : (element.innerText || element.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 240),
           style: {
             display: style.display,
             visibility: style.visibility,
@@ -1065,7 +1065,7 @@ async function uploadResume(page, context) {
       }
 
       if (attempt > 1) {
-        log("Resume delete-and-upload retry " + attempt + "/" + UPLOAD_RETRIES);
+        log("Resume upload retry " + attempt + "/" + UPLOAD_RETRIES);
         await page.waitForTimeout(RETRY_DELAY_MS);
         if (page.isClosed()) page = await createFreshPage(context);
         await openProfile(page);
@@ -1123,13 +1123,13 @@ async function uploadResume(page, context) {
       const verified = {
         confirmed: true,
         filename: fileInfo.name,
-        method: "Deleted previous resume, uploaded configured file, and verified it remained on the profile after reload"
+        method: "Uploaded configured resume and verified the profile entry remained after reload"
       };
-      log("Naukri resume delete-and-upload CONFIRMED: " + verified.filename + " (verification: " + verified.method + ").");
+      log("Naukri resume upload CONFIRMED: " + verified.filename + " (verification: " + verified.method + ").");
       return verified;
     } catch (error) {
       lastError = error;
-      log("Resume delete-and-upload attempt " + attempt + "/" + UPLOAD_RETRIES + " failed: " + error.message);
+      log("Resume upload attempt " + attempt + "/" + UPLOAD_RETRIES + " failed: " + error.message);
       if (page && page.isClosed() && context && !contextIsClosed(context)) {
         page = await createFreshPage(context).catch(() => page);
       }
@@ -1152,7 +1152,7 @@ async function uploadResume(page, context) {
     if (labels.length) log("Resume upload UI snapshot: " + JSON.stringify(labels));
   }
 
-  throw new Error("Naukri resume delete-and-upload was NOT verified after " + UPLOAD_RETRIES +
+  throw new Error("Naukri resume upload was NOT verified after " + UPLOAD_RETRIES +
     " attempts. " + (lastError ? lastError.message : "Unknown upload error"));
 }
 
