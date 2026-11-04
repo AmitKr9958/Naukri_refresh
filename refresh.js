@@ -979,6 +979,7 @@ async function deleteExistingResume(page, fileInfo, recheckedAfterReload = false
           remainingNames.join(", ")
         );
         await page.waitForTimeout(1800);
+        page.removeListener("dialog", dialogHandler);
         return await deleteExistingResume(page, fileInfo, true, deletionRetryCount + 1);
       }
 
