@@ -550,7 +550,7 @@ async function clickNaukriResumeUploadControl(page) {
   throw new Error("Could not open Naukri's visible 'Upload resume' control. Refusing to use the first generic file input.");
 }
 
-async function waitForResumeUploadConfirmation(page, fileInfo) {
+async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText = "") {
   const patterns = [
     /resume uploaded successfully/i,
     /resume has been uploaded/i,
@@ -566,8 +566,9 @@ async function waitForResumeUploadConfirmation(page, fileInfo) {
     bodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
     const match = patterns.find(pattern => pattern.test(bodyText));
     if (match) return { confirmed: true, method: "Naukri success message", filename: fileInfo.name };
-    if (bodyText.toLowerCase().includes(fileInfo.name.toLowerCase())) {
-      return { confirmed: true, method: "Uploaded filename displayed on profile", filename: fileInfo.name };
+    const filenameWasAlreadyVisible = String(previousBodyText).toLowerCase().includes(fileInfo.name.toLowerCase());
+    if (!filenameWasAlreadyVisible && bodyText.toLowerCase().includes(fileInfo.name.toLowerCase())) {
+      return { confirmed: true, method: "Newly displayed uploaded filename", filename: fileInfo.name };
     }
     await page.waitForTimeout(1000);
   }
@@ -664,9 +665,10 @@ async function uploadResume(page, context) {
         if (page.isClosed()) page = await createFreshPage(context);
         await openProfile(page);
       }
+      const previousBodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
       const chooser = await clickNaukriResumeUploadControl(page);
       await setResumeFile(chooser);
-      const confirmation = await waitForResumeUploadConfirmation(page, fileInfo);
+      const confirmation = await waitForResumeUploadConfirmation(page, fileInfo, previousBodyText);
       log("Naukri resume upload CONFIRMED: " + confirmation.filename +
           " (verification: " + confirmation.method + ").");
       return confirmation;
