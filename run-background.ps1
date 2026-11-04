@@ -247,7 +247,10 @@ function Start-NaukriRefreshWithRecovery {
         Write-Host "Starting Naukri Refresh attempt $attempt/$MaxAttempts."
         if (-not (Reset-NaukriProfileLocks)) { Start-Sleep -Seconds 5; continue }
         try {
-            $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
+            # Keep the Node process in a normal window state so its headed Chromium
+            # child can create a visible, maximized desktop window. The PowerShell
+            # Task Scheduler host remains hidden independently.
+            $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Normal
 
             # Do not consider Node "started" merely because the process exists.
             # Playwright can launch Chromium and then remain stuck in
@@ -391,7 +394,30 @@ try {
             }
             Hide-NaukriBrowserWindows
             $exitCode = $nodeProcess.ExitCode
+
+            # refresh.js writes this terminal state only after the configured
+            # resume is confirmed as persisted on the Naukri profile.
+            $completedUpload = $false
+            try {
+                if (Test-Path -LiteralPath $healthPath) {
+                    $finalHealth = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
+                    $completedUpload = (
+                        [string]$finalHealth.status -eq "STOPPED" -and
+                        [string]$finalHealth.phase -eq "resume_uploaded"
+                    )
+                }
+            } catch {
+                Write-LauncherLog ("Could not inspect final health state: " + $_.Exception.Message)
+            }
+
             Reset-NaukriProfileLocks
+            if ($completedUpload) {
+                $exitCode = 0
+                Write-LauncherLog "Verified resume upload completed. Launcher will exit and will not restart automation."
+                Write-Host "Resume upload verified. Naukri automation has stopped successfully."
+                break
+            }
+
             Write-Host "Naukri Refresh exited. Restarting in 30 seconds."
             Start-Sleep -Seconds 30
         } catch {
