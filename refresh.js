@@ -492,6 +492,13 @@ async function openProfile(page) {
 async function maximizeChromiumWindow(context, page) {
   if (!context || contextIsClosed(context) || !page || page.isClosed()) return false;
 
+  // Background mode must not issue CDP maximize commands: they can restore
+  // a window that the Windows launcher has deliberately hidden.
+  if (String(process.env.HIDE_BROWSER_WINDOW || "false").toLowerCase() === "true") {
+    log("Background mode enabled; leaving Chromium window state to the launcher hider.");
+    return true;
+  }
+
   let session;
   try {
     session = await context.newCDPSession(page);
