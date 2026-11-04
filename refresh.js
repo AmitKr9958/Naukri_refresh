@@ -576,7 +576,7 @@ async function clickNaukriResumeUploadControl(page) {
   );
 }
 
-async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText = "") {
+async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText = "", replacementConfirmed = false) {
   const patterns = [
     /resume uploaded successfully/i,
     /resume has been uploaded/i,
@@ -595,6 +595,20 @@ async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText 
     const filenameWasAlreadyVisible = String(previousBodyText).toLowerCase().includes(fileInfo.name.toLowerCase());
     if (!filenameWasAlreadyVisible && bodyText.toLowerCase().includes(fileInfo.name.toLowerCase())) {
       return { confirmed: true, method: "Newly displayed uploaded filename", filename: fileInfo.name };
+    }
+    // When replacing the same filename, it is already present before upload.
+    // Only accept it after Naukri's explicit replacement prompt was clicked
+    // and dismissed, while the resume entry remains visible on the profile.
+    if (
+      replacementConfirmed &&
+      bodyText.toLowerCase().includes(fileInfo.name.toLowerCase()) &&
+      /uploaded on/i.test(bodyText)
+    ) {
+      return {
+        confirmed: true,
+        method: "Naukri replacement prompt accepted and resume entry remains visible",
+        filename: fileInfo.name
+      };
     }
     await page.waitForTimeout(1000);
   }
@@ -673,6 +687,67 @@ async function tryNormalProfileUpdate(page) {
   return { attempted: false, resumeUploaded: false };
 }
 
+async function confirmResumeReplacement(page) {
+  const deadline = Date.now() + 7000;
+  let lastClickError = null;
+
+  while (Date.now() < deadline) {
+    if (page.isClosed()) {
+      throw new Error("Naukri page closed while waiting for resume replacement confirmation.");
+    }
+
+    // Naukri renders this confirmation as a link. Prefer its accessible
+    // role/name, then use a narrowly scoped anchor fallback.
+    let confirmation = page.getByRole("link", {
+      name: "Yes, upload new",
+      exact: true
+    }).first();
+
+    let visible = await confirmation.isVisible().catch(() => false);
+
+    if (!visible) {
+      confirmation = page.locator("a").filter({
+        hasText: /^\\s*Yes, upload new\\s*$/i
+      }).first();
+      visible = await confirmation.isVisible().catch(() => false);
+    }
+
+    if (visible) {
+      try {
+        await confirmation.click({ timeout: 5000 });
+        log("Clicked Naukri's explicit 'Yes, upload new' replacement link.");
+
+        const dismissed = await page.waitForFunction(() => {
+          const links = Array.from(document.querySelectorAll("a"));
+          return !links.some(link =>
+            (link.innerText || "").trim().toLowerCase() === "yes, upload new" &&
+            link.getClientRects().length > 0
+          );
+        }, { timeout: 10000 }).then(() => true).catch(() => false);
+
+        if (!dismissed) {
+          throw new Error("Naukri's 'Yes, upload new' prompt remained visible after clicking.");
+        }
+
+        log("Naukri's resume replacement prompt was dismissed.");
+        return true;
+      } catch (error) {
+        lastClickError = error;
+        log("Could not complete Naukri resume replacement confirmation: " + error.message);
+      }
+    }
+
+    await page.waitForTimeout(500);
+  }
+
+  if (lastClickError) {
+    throw new Error("Resume replacement confirmation failed: " + lastClickError.message);
+  }
+
+  log("Naukri did not display a resume replacement prompt; continuing with normal upload confirmation.");
+  return false;
+}
+
 async function uploadResume(page, context) {
   const fileInfo = getResumeFileInfo();
   let lastError = null;
@@ -695,14 +770,16 @@ async function uploadResume(page, context) {
       const uploadTarget = await clickNaukriResumeUploadControl(page);
       await setResumeFile(uploadTarget);
 
-      // Naukri may ask whether to replace the existing resume.
-      const replaceConfirmation = page.getByText(/^Yes, upload new$/i).first();
-      if (await replaceConfirmation.isVisible({ timeout: 2500 }).catch(() => false)) {
-        await replaceConfirmation.click({ timeout: 5000 });
-        log("Confirmed Naukri's explicit 'Yes, upload new' prompt.");
-      }
+      // Naukri asks for explicit confirmation when the same resume filename
+      // already exists. Click the actual link and wait for the prompt to close.
+      const replacementConfirmed = await confirmResumeReplacement(page);
 
-      const confirmation = await waitForResumeUploadConfirmation(page, fileInfo, previousBodyText);
+      const confirmation = await waitForResumeUploadConfirmation(
+        page,
+        fileInfo,
+        previousBodyText,
+        replacementConfirmed
+      );
       log("Naukri resume upload CONFIRMED: " + confirmation.filename +
           " (verification: " + confirmation.method + ").");
       return confirmation;
