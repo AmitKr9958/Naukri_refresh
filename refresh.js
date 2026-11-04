@@ -486,6 +486,27 @@ async function openProfile(page) {
   );
 }
 
+async function maximizeChromiumWindow(context, page) {
+  if (!context || contextIsClosed(context) || !page || page.isClosed()) return false;
+
+  let session;
+  try {
+    session = await context.newCDPSession(page);
+    const target = await session.send("Browser.getWindowForTarget");
+    await session.send("Browser.setWindowBounds", {
+      windowId: target.windowId,
+      bounds: { windowState: "maximized" }
+    });
+    log("Chromium desktop window maximized successfully.");
+    return true;
+  } catch (error) {
+    log("Could not maximize Chromium through the desktop window API: " + error.message);
+    return false;
+  } finally {
+    if (session) await session.detach().catch(() => {});
+  }
+}
+
 async function createFreshPage(context) {
   if (contextIsClosed(context)) {
     throw new Error("Naukri browser context is closed.");
@@ -508,10 +529,13 @@ async function createFreshPage(context) {
   }
 
   if (healthyPage) {
+    await maximizeChromiumWindow(context, healthyPage);
     return healthyPage;
   }
 
-  return await context.newPage();
+  const page = await context.newPage();
+  await maximizeChromiumWindow(context, page);
+  return page;
 }
 
 const MAX_RESUME_BYTES = readPositiveNumberEnv("MAX_RESUME_BYTES", 2 * 1024 * 1024, 1024, true);
@@ -1211,7 +1235,8 @@ async function launchBrowserContext() {
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-features=DevToolsDebuggingRestrictions",
-    "--start-maximized"
+    "--start-maximized",
+    "--window-position=0,0"
   ];
 
   log(
@@ -1319,8 +1344,8 @@ async function recoverBrowserContext(currentContext) {
     writeHealth("STARTING", 0, { phase: "launching_browser" });
     log("Startup: launching persistent Chromium with the saved Naukri profile.");
     context = await launchBrowserContext();
-    log("Startup: persistent Chromium launched successfully.");
-    writeHealth("RUNNING", 0, { phase: "browser_ready", next_cycle: 1 });
+    log("Startup: persistent Chromium launched successfully; headed desktop window will be maximized.");
+    writeHealth("RUNNING", 0, { phase: "browser_ready", browser_visible: true, browser_maximized: true, next_cycle: 1 });
 
     let cycle = 0;
     let failures = 0;
@@ -1371,6 +1396,24 @@ async function recoverBrowserContext(currentContext) {
           next_cycle_after_minutes: INTERVAL_MINUTES
         });
         await sendTelegramSuccess(cycle, uploadConfirmation);
+
+        // A confirmed upload is the terminal success condition. Do not enter
+        // another five-minute cycle or re-upload the same resume.
+        log("Resume upload verified. Stopping automation permanently for this run.");
+        writeHealth("STOPPED", cycle, {
+          phase: "resume_uploaded",
+          reason: "configured_resume_successfully_uploaded_and_verified",
+          resume_filename: uploadConfirmation.filename,
+          verification: uploadConfirmation.method,
+          stopped_at: new Date().toISOString()
+        });
+        if (context && !contextIsClosed(context)) {
+          await context.close().catch(error =>
+            log("Chromium close after successful upload reported: " + error.message)
+          );
+        }
+        releaseInstanceLock();
+        process.exit(0);
       } catch (error) {
         const errorMessage = String(error && error.message || error);
         const contextClosedError =
