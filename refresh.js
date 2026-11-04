@@ -739,8 +739,8 @@ async function deleteExistingResume(page, fileInfo) {
           element.getAttribute("aria-label"),
           element.getAttribute("title"),
           element.getAttribute("data-tooltip")
-        ].filter(Boolean).join(" ").replace(/\\s+/g, " ").trim().toLowerCase();
-        return /(^|\\b)(delete|remove)(\\b|$)/i.test(label) ||
+        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().toLowerCase();
+        return /(^|\b)(delete|remove)(\b|$)/i.test(label) ||
           /deleteonetheme/i.test(label);
       });
       if (match) {
@@ -762,15 +762,13 @@ async function deleteExistingResume(page, fileInfo) {
   const deleteControl = page.locator('a,button,[role="button"]').nth(deleteIndex);
   const deleteLabel = await deleteControl.evaluate(element => ({
     tag: element.tagName,
-    text: (element.innerText || element.textContent || "").replace(/\\s+/g, " ").trim(),
+    text: (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim(),
     ariaLabel: element.getAttribute("aria-label"),
     title: element.getAttribute("title")
   })).catch(() => ({}));
   log("Deleting the existing configured resume using its adjacent control: " + JSON.stringify(deleteLabel));
 
-  let nativeDialogHandled = false;
   const dialogHandler = async dialog => {
-    nativeDialogHandled = true;
     await dialog.accept().catch(() => {});
   };
   page.once("dialog", dialogHandler);
@@ -819,9 +817,8 @@ async function deleteExistingResume(page, fileInfo) {
 }
 
 async function confirmResumeReplacement(page) {
-  // Naukri may delay its duplicate-resume confirmation well beyond the file
-  // input change. The latest observed UI rendered this link about two minutes
-  // after selection, so allow a short 15-second duplicate-check window; the old resume is deleted before this upload.
+  // The existing resume is deleted before upload, so a duplicate prompt should be unusual.
+  // Keep a short fallback window in case Naukri still displays one.
   const deadline = Date.now() + 15000;
   let lastDomMatchAt = 0;
   let lastClickError = null;
