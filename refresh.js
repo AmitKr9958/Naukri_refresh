@@ -1367,7 +1367,6 @@ async function recoverBrowserContext(currentContext) {
     process.on("SIGTERM", stop);
 
     while (true) {
-      const cycleStartedAt = Date.now();
       cycle++;
       writeHealth("RUNNING", cycle, { phase: "starting_cycle" });
       await flushPendingTelegramNotifications();
