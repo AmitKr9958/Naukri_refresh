@@ -725,7 +725,7 @@ async function confirmResumeReplacement(page) {
     // the anchor DOM before Playwright's accessibility snapshot catches up.
     const candidateIndex = await page.locator("a").evaluateAll(links => {
       return links.findIndex(link => {
-        const text = (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
+        const text = (link.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
         return text === "yes, upload new";
       });
     }).catch(() => -1);
@@ -741,7 +741,7 @@ async function confirmResumeReplacement(page) {
             Number(style.opacity || 1) > 0 &&
             rect.width > 0 &&
             rect.height > 0,
-          text: (link.textContent || "").replace(/\\s+/g, " ").trim()
+          text: (link.textContent || "").replace(/\s+/g, " ").trim()
         };
       }).catch(() => ({ visible: false, text: "" }));
 
@@ -759,7 +759,7 @@ async function confirmResumeReplacement(page) {
         // was dispatched. This also prevents a false success on a stale dialog.
         await page.waitForFunction(() => {
           return !Array.from(document.querySelectorAll("a")).some(link => {
-            const text = (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
+            const text = (link.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
             if (text !== "yes, upload new") return false;
             const style = window.getComputedStyle(link);
             const rect = link.getBoundingClientRect();
@@ -793,7 +793,7 @@ async function confirmResumeReplacement(page) {
   // Capture whether the expected link exists at all when the wait expires.
   const finalState = await page.locator("a").evaluateAll(links => {
     const matches = links.filter(link =>
-      (link.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase() === "yes, upload new"
+      (link.textContent || "").replace(/\s+/g, " ").trim().toLowerCase() === "yes, upload new"
     );
     return matches.map(link => {
       const style = window.getComputedStyle(link);
@@ -804,7 +804,7 @@ async function confirmResumeReplacement(page) {
           Number(style.opacity || 1) > 0 &&
           rect.width > 0 &&
           rect.height > 0,
-        text: (link.textContent || "").replace(/\\s+/g, " ").trim()
+        text: (link.textContent || "").replace(/\s+/g, " ").trim()
       };
     });
   }).catch(() => []);
