@@ -2,6 +2,7 @@ const { chromium } = require("playwright");
 const nodemailer = require("nodemailer");
 const fs = require("fs");
 const path = require("path");
+const { acquireInstanceLock, releaseInstanceLock } = require("./instance-lock");
 require("dotenv").config();
 
 function readPositiveNumberEnv(name, fallback, minimum = 1, integer = false) {
@@ -371,47 +372,6 @@ function writeHealth(status, cycle, details = {}) {
   } catch (error) {
     console.log("[health] Could not write health state: " + error.message);
   }
-}
-
-function acquireInstanceLock() {
-  const payload = JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() });
-  try {
-    fs.writeFileSync(INSTANCE_LOCK_PATH, payload, { flag: "wx" });
-    return;
-  } catch (error) {
-    if (error.code !== "EEXIST") throw error;
-  }
-
-  try {
-    const existing = JSON.parse(fs.readFileSync(INSTANCE_LOCK_PATH, "utf8"));
-    const existingPid = Number(existing.pid);
-    if (existingPid && existingPid !== process.pid) {
-      try {
-        process.kill(existingPid, 0);
-        throw new Error("Another refresh.js instance is already running (PID " + existingPid + ").");
-      } catch (probeError) {
-        if (probeError && probeError.message && /another refresh\.js instance/i.test(probeError.message)) {
-          throw probeError;
-        }
-      }
-    }
-  } catch (error) {
-    if (error && /another refresh\.js instance/i.test(String(error.message || ""))) {
-      throw error;
-    }
-  }
-
-  fs.unlinkSync(INSTANCE_LOCK_PATH);
-  fs.writeFileSync(INSTANCE_LOCK_PATH, payload, { flag: "wx" });
-}
-
-function releaseInstanceLock() {
-  try {
-    const existing = JSON.parse(fs.readFileSync(INSTANCE_LOCK_PATH, "utf8"));
-    if (Number(existing.pid) === process.pid) {
-      fs.unlinkSync(INSTANCE_LOCK_PATH);
-    }
-  } catch {}
 }
 
 async function dismissPopups(page) {
@@ -1430,9 +1390,10 @@ async function recoverBrowserContext(currentContext) {
   }
 
   let context;
+  let instanceLock = null;
 
   try {
-    acquireInstanceLock();
+    instanceLock = acquireInstanceLock(INSTANCE_LOCK_PATH, { scriptPath: path.resolve(__filename) });
     writeHealth("STARTING", 0, { phase: "launching_browser" });
     log("Startup: launching persistent Chromium with the saved Naukri profile.");
     context = await launchBrowserContext();
@@ -1447,7 +1408,7 @@ async function recoverBrowserContext(currentContext) {
       writeHealth("STOPPING", 0, { phase: "shutdown" });
       if (context) await context.close().catch(() => {});
       writeHealth("STOPPED", 0, { phase: "shutdown" });
-      releaseInstanceLock();
+      releaseInstanceLock(INSTANCE_LOCK_PATH, instanceLock);
       process.exit(0);
     };
 
@@ -1634,7 +1595,7 @@ async function recoverBrowserContext(currentContext) {
           );
           writeHealth("STOPPED", cycle, { phase: "max_consecutive_failures", failures });
           await context.close().catch(() => {});
-          releaseInstanceLock();
+          releaseInstanceLock(INSTANCE_LOCK_PATH, instanceLock);
           process.exit(1);
         }
       }
@@ -1659,6 +1620,10 @@ async function recoverBrowserContext(currentContext) {
       await new Promise(resolve => setTimeout(resolve, waitAfterCompletionMs));
     }
   } catch (error) {
+    if (error && error.code === "EINSTANCELOCK") {
+      log("Duplicate invocation refused; existing refresh.js process remains the sole owner (PID " + error.ownerPid + ").");
+      return;
+    }
     writeHealth("STARTUP_FAILED", 0, { phase: "startup", error: error.message });
     log("Startup failed: " + error.message);
     await sendFailureAlert(
@@ -1666,9 +1631,9 @@ async function recoverBrowserContext(currentContext) {
       error.message
     );
     await sendTelegramFailure(0, error.message, "Startup failed");
-    releaseInstanceLock();
+    releaseInstanceLock(INSTANCE_LOCK_PATH, instanceLock);
     process.exit(1);
   } finally {
-    releaseInstanceLock();
+    releaseInstanceLock(INSTANCE_LOCK_PATH, instanceLock);
   }
 })();
