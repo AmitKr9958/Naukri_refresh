@@ -43,7 +43,7 @@ Runtime logs are written to `logs\naukri-refresh.log`; wake-task activity is wri
 - The existing Naukri navigation/upload retry logic remains unchanged.
 - `refresh.js` has its own PID lock, so a second copy cannot create a competing Chromium profile session.
 - Browser-context failures are recovered automatically when possible.
-- Successful cycles, failures, and browser recovery events can be sent to Telegram at no cost.
+- Every successful five-minute profile/resume verification cycle, failures, and browser recovery events can be sent to Telegram at no cost. Chromium remains open between cycles. If the configured resume is already listed as uploaded today, the automation verifies it and skips a duplicate upload while still sending the cycle confirmation.
 - The log is rotated automatically to prevent unbounded disk growth.
 
 Start now:
