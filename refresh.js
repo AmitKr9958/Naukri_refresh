@@ -613,7 +613,7 @@ async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText 
     await page.waitForTimeout(1000);
   }
   throw new Error(
-    "The file was selected, but Naukri did not show a verifiable upload confirmation within 40 seconds. " +
+    "The file was selected, but Naukri did not show a verifiable upload confirmation within 60 seconds. " +
     "No success notification will be sent. Visible page text: " +
     bodyText.replace(/\s+/g, " ").slice(0, 1800)
   );
@@ -690,7 +690,7 @@ async function tryNormalProfileUpdate(page) {
 async function confirmResumeReplacement(page) {
   // Naukri can render the replacement prompt well after the file input changes.
   // Keep polling long enough for its asynchronous upload/duplicate check to finish.
-  const deadline = Date.now() + 35000;
+  const deadline = Date.now() + 55000;
   let lastClickError = null;
 
   while (Date.now() < deadline) {
@@ -776,7 +776,7 @@ async function confirmResumeReplacement(page) {
     throw new Error("Resume replacement confirmation failed: " + lastClickError.message);
   }
 
-  log("Naukri did not display a visible resume replacement prompt within 35 seconds.");
+  log("Naukri did not display a visible resume replacement prompt within 55 seconds.");
   return false;
 }
 
