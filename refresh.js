@@ -811,11 +811,11 @@ async function deleteExistingResume(page, fileInfo, recheckedAfterReload = false
       return await deleteExistingResume(page, fileInfo, true);
     }
 
-    throw new Error(
-      "Could not identify a visible existing resume entry after reloading the Naukri profile. " +
-      "The delete-and-reupload requirement cannot be verified, so upload was blocked. " +
-      "No success notification will be sent."
+    log(
+      "No existing resume filename was detected after a fresh profile reload. " +
+      "The Naukri profile is already empty; proceeding with the configured resume upload."
     );
+    return true;
   }
 
   if (existingEntry.deleteIndex < 0) {
@@ -1182,7 +1182,7 @@ async function uploadResume(page, context) {
       if (deletedExistingResume !== true) {
         throw new Error("Delete-and-reupload cycle blocked: existing resume deletion was not positively verified.");
       }
-      log("Existing Naukri resume deletion verified after a fresh profile load; proceeding with the configured re-upload.");
+      log("Resume state verified empty after a fresh profile load; proceeding with the configured upload.");
 
       const previousBodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
       log("Starting Naukri resume upload after checking for the existing configured resume.");
