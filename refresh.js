@@ -454,11 +454,10 @@ async function openProfile(page) {
         " failed: " + error.message
       );
 
-      // A timed-out page can remain in a bad loading state. Dispose of that
-      // page before retrying so the next attempt always starts clean.
-      if (attempt < NAVIGATION_RETRIES && page && !page.isClosed()) {
-        await page.close().catch(() => {});
-      }
+      // Keep the page alive after a navigation timeout.
+      // Reuse the same page for the next page.goto() retry.
+      // If Chromium itself closes the page, the caller's
+      // browser-recovery mechanism will recreate the session.
     }
   }
 
