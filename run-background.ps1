@@ -416,11 +416,11 @@ try {
             Write-LauncherLog "Main loop: starting refresh.js recovery routine."
             $nodeProcess = Start-NaukriRefreshWithRecovery -MaxAttempts 5
             while (-not $nodeProcess.HasExited) {
-                Hide-NaukriBrowserWindows
+                Show-NaukriBrowserWindows
                 Start-Sleep -Milliseconds 750
                 try { $nodeProcess.Refresh() } catch {}
             }
-            Hide-NaukriBrowserWindows
+            Show-NaukriBrowserWindows
             $exitCode = $nodeProcess.ExitCode
 
             # refresh.js writes this terminal state only after the configured
