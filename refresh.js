@@ -1080,10 +1080,9 @@ async function uploadResume(page, context) {
   const fileInfo = getResumeFileInfo();
   let lastError = null;
 
-  // Run the configured resume upload on every five-minute cycle. Naukri's
-  // own "Yes, upload new" workflow replaces the previous resume safely; do
-  // not delete the old file first, because a failed upload would leave the
-  // profile without a resume.
+  // Run the configured resume upload on every five-minute cycle.
+  // If the configured filename is already on the profile, remove that exact
+  // entry first; otherwise upload directly without deleting another file.
   for (let attempt = 1; attempt <= UPLOAD_RETRIES; attempt++) {
     try {
       if (!page || page.isClosed()) {
