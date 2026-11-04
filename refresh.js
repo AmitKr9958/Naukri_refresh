@@ -784,7 +784,7 @@ async function deleteExistingResume(page, fileInfo) {
     if (await confirm.isVisible().catch(() => false)) {
       await confirm.click({ timeout: 5000 });
     } else {
-      const yesDelete = dialog.getByRole("button", { name: /^(yes,?\\s*)?delete$/i }).first();
+      const yesDelete = dialog.getByRole("button", { name: /^(yes,?\s*)?delete$/i }).first();
       if (await yesDelete.isVisible().catch(() => false)) {
         await yesDelete.click({ timeout: 5000 });
       } else {
