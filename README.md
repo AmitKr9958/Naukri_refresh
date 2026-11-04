@@ -43,7 +43,7 @@ Runtime logs are written to `logs\naukri-refresh.log`; wake-task activity is wri
 - The existing Naukri navigation/upload retry logic remains unchanged.
 - `refresh.js` has its own PID lock, so a second copy cannot create a competing Chromium profile session.
 - Browser-context failures are recovered automatically when possible.
-- Every five-minute cycle launches a fresh headed Chromium session, opens the saved Naukri profile, uploads/replaces the configured resume through Naukri's native replacement flow, verifies that the new resume is persisted, closes Chromium, and then sends the Telegram success notification. Chromium stays closed during the five-minute wait. The previous resume is replaced through Naukri's own upload confirmation rather than being deleted first; this avoids leaving the profile without a resume if an upload fails. Failure and browser-recovery events can also be sent to Telegram.
+- Every five-minute cycle launches a fresh headed Chromium session, opens the saved Naukri profile, checks for the existing profile entry matching the configured resume filename, deletes that entry using only its adjacent Delete control when present, and uploads the configured resume. If that exact entry is absent, it uploads without deleting anything. The automation verifies that the configured resume is persisted, closes Chromium, and then sends the Telegram success notification. Chromium stays closed during the five-minute wait. Because deletion happens before upload as requested, an upload failure after deletion can temporarily leave the profile without that resume; failure notifications are sent to Telegram when configured.
 - The log is rotated automatically to prevent unbounded disk growth.
 
 Start now:
