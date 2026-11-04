@@ -957,8 +957,11 @@ async function deleteExistingResume(page, fileInfo) {
       }, existingEntry.filename).catch(() => true);
 
       if (oldEntryStillPresent) {
-        log("Existing resume is still present after profile reload. It will not be deleted repeatedly; proceeding to Naukri's native replacement flow.");
-        return false;
+        throw new Error(
+          "Resume deletion was not verified: the existing profile entry (" +
+          existingEntry.filename +
+          ") is still present after reloading Naukri. Upload was stopped to avoid a false-positive refresh."
+        );
       }
     }
   } finally {
@@ -1166,8 +1169,8 @@ async function uploadResume(page, context) {
   let lastError = null;
 
   // Run the configured resume upload on every five-minute cycle.
-  // If the configured filename is already on the profile, remove that exact
-  // entry first; otherwise upload directly without deleting another file.
+  // Delete the currently visible resume entry first, regardless of its
+  // filename. If deletion cannot be verified, stop before selecting the file.
   for (let attempt = 1; attempt <= UPLOAD_RETRIES; attempt++) {
     try {
       if (!page || page.isClosed()) {
@@ -1185,9 +1188,9 @@ async function uploadResume(page, context) {
         await openProfile(page);
       }
 
-      // Remove the existing profile entry only when it matches the configured
-      // resume filename. The helper clicks only the Delete control adjacent to
-      // that exact filename; if it is absent, proceed directly to upload.
+      // Delete the current resume entry (whatever its filename) before
+      // uploading the configured file. deleteExistingResume throws if an
+      // existing entry remains after a server-side profile reload.
       const deletedExistingResume = await deleteExistingResume(page, fileInfo);
       if (deletedExistingResume) {
         log("Existing configured resume removed; uploading the configured replacement now.");
@@ -1454,9 +1457,14 @@ async function recoverBrowserContext(currentContext) {
         // profile keeps the Naukri login, but Chromium itself must be closed
         // during the five-minute waiting period.
         if (context && !contextIsClosed(context)) {
-          await context.close().catch(error =>
-            log("Could not close Chromium cleanly after upload: " + error.message)
-          );
+          try {
+            await context.close();
+          } catch (closeError) {
+            throw new Error(
+              "Resume was verified, but Chromium did not close cleanly: " +
+              closeError.message
+            );
+          }
         }
         context = null;
 
@@ -1507,7 +1515,10 @@ async function recoverBrowserContext(currentContext) {
           }
         } else {
           failures++;
-          log("Cycle " + cycle + " failed: " + errorMessage);
+          log(
+            "Cycle " + cycle + " failed: " + errorMessage +
+            (error && error.stack ? " | Stack: " + String(error.stack).split("\n").slice(0, 7).join(" <- ") : "")
+          );
 
           // Navigation/network failures are recoverable. Dispose of the
           // affected page and recreate the browser context before the next
