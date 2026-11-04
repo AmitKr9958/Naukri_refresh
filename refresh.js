@@ -296,14 +296,17 @@ async function flushPendingTelegramNotifications() {
 }
 
 async function sendTelegramSuccess(cycle, confirmation) {
+  const alreadyUploadedToday = confirmation.alreadyUploadedToday === true;
   const message =
-    "🟢 Naukri Automation — RESUME UPLOAD CONFIRMED\n\n" +
+    "🟢 Naukri Automation — RESUME STATUS VERIFIED\n\n" +
     "Run: #" + cycle + "\n" +
     "Resume: " + confirmation.filename + "\n" +
+    "Action: " + (alreadyUploadedToday
+      ? "Resume was already uploaded today; duplicate upload was skipped."
+      : "Resume uploaded successfully and verified.") + "\n" +
     "Verification: " + confirmation.method + "\n" +
-    "Interval: " + INTERVAL_MINUTES + " minutes\n" +
-    "Time: " + new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + "\n\n" +
-    "Status: Configured resume entry verified on the Naukri profile after reload";
+    "Next check: in " + INTERVAL_MINUTES + " minutes\n" +
+    "Time: " + new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
   await sendTelegramMessage(message, "success");
 }
 
@@ -1102,7 +1105,8 @@ async function uploadResume(page, context) {
         const confirmation = {
           confirmed: true,
           filename: fileInfo.name,
-          method: "Configured resume is already listed on the Naukri profile with today's upload date; duplicate replacement skipped"
+          method: "Configured resume is already listed on the Naukri profile with today's upload date; duplicate replacement skipped",
+          alreadyUploadedToday: true
         };
         log("Resume already current on Naukri for today; skipping duplicate replacement attempt.");
         return confirmation;
@@ -1397,23 +1401,10 @@ async function recoverBrowserContext(currentContext) {
         });
         await sendTelegramSuccess(cycle, uploadConfirmation);
 
-        // A confirmed upload is the terminal success condition. Do not enter
-        // another five-minute cycle or re-upload the same resume.
-        log("Resume upload verified. Stopping automation permanently for this run.");
-        writeHealth("STOPPED", cycle, {
-          phase: "resume_uploaded",
-          reason: "configured_resume_successfully_uploaded_and_verified",
-          resume_filename: uploadConfirmation.filename,
-          verification: uploadConfirmation.method,
-          stopped_at: new Date().toISOString()
-        });
-        if (context && !contextIsClosed(context)) {
-          await context.close().catch(error =>
-            log("Chromium close after successful upload reported: " + error.message)
-          );
-        }
-        releaseInstanceLock();
-        process.exit(0);
+        // Keep the persistent Chromium session alive. The next cycle verifies
+        // the profile again; uploadResume() skips duplicate uploads when the
+        // configured resume is already listed with today's upload date.
+        log("Cycle " + cycle + ": resume status verified; keeping Chromium open for the next five-minute check.");
       } catch (error) {
         const errorMessage = String(error && error.message || error);
         const contextClosedError =
@@ -1545,20 +1536,15 @@ async function recoverBrowserContext(currentContext) {
         }
       }
 
-      const remainingIntervalMs = Math.max(
-        0,
-        INTERVAL_MINUTES * 60 * 1000 - (Date.now() - cycleStartedAt)
-      );
+      const waitAfterCompletionMs = INTERVAL_MINUTES * 60 * 1000;
       writeHealth("WAITING", cycle, {
         phase: "waiting",
         next_cycle: cycle + 1,
-        next_cycle_after_minutes: Number((remainingIntervalMs / 60000).toFixed(2))
+        next_cycle_after_minutes: INTERVAL_MINUTES
       });
-      log("Cycle " + cycle + ": next cycle scheduled in " +
-        Math.ceil(remainingIntervalMs / 1000) + " seconds (five-minute start-to-start interval).");
-      if (remainingIntervalMs > 0) {
-        await new Promise(resolve => setTimeout(resolve, remainingIntervalMs));
-      }
+      log("Cycle " + cycle + ": completed. Next profile/resume verification starts in " +
+        INTERVAL_MINUTES + " minutes.");
+      await new Promise(resolve => setTimeout(resolve, waitAfterCompletionMs));
     }
   } catch (error) {
     writeHealth("STARTUP_FAILED", 0, { phase: "startup", error: error.message });
