@@ -439,13 +439,32 @@ async function openProfile(page) {
         await page.waitForTimeout(RETRY_DELAY_MS);
       }
 
+      // Do not wait for DOMContentLoaded: Naukri's analytics/third-party
+      // resources can hold that event open even after the profile response
+      // has committed. Wait for navigation commit, then for the real resume
+      // upload control that proves the profile application is usable.
       await page.goto(PROFILE_URL, {
-        waitUntil: "domcontentloaded",
-        timeout: 45000
+        waitUntil: "commit",
+        timeout: 30000
       });
 
-      await page.waitForTimeout(2500);
+      await page.locator('input#attachCV[type="file"][aria-label="Upload resume"]')
+        .waitFor({ state: "attached", timeout: 45000 });
+
+      await page.waitForFunction(() => {
+        const input = document.querySelector('input#attachCV[type="file"][aria-label="Upload resume"]');
+        return Boolean(input && input.isConnected && !input.disabled);
+      }, undefined, { timeout: 15000 });
+
+      await page.waitForTimeout(1500);
       await dismissPopups(page);
+
+      const currentUrl = page.url();
+      if (/login|signin|sign-in/i.test(currentUrl)) {
+        throw new Error("Naukri redirected to login; the saved session may have expired.");
+      }
+
+      log("Naukri profile is ready; the dedicated resume upload input is attached and enabled.");
       return;
     } catch (error) {
       lastError = error;
@@ -454,15 +473,13 @@ async function openProfile(page) {
         " failed: " + error.message
       );
 
-      // Keep the page alive after a navigation timeout.
-      // Reuse the same page for the next page.goto() retry.
-      // If Chromium itself closes the page, the caller's
-      // browser-recovery mechanism will recreate the session.
+      // Reuse the page on retry. A failed DOMContentLoaded wait must not be
+      // treated as proof that the profile itself failed to load.
     }
   }
 
   throw new Error(
-    "Could not open Naukri profile after " +
+    "Could not open a usable Naukri profile after " +
     NAVIGATION_RETRIES +
     " attempts. Last error: " +
     (lastError ? lastError.message : "unknown navigation error")
@@ -594,6 +611,9 @@ async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText 
     if (match) return { confirmed: true, method: "Naukri success message", filename: fileInfo.name };
     const filenameWasAlreadyVisible = String(previousBodyText).toLowerCase().includes(fileInfo.name.toLowerCase());
     if (!filenameWasAlreadyVisible && bodyText.toLowerCase().includes(fileInfo.name.toLowerCase())) {
+      // Filename appearance is useful only when it was absent before this
+      // upload attempt. An existing same-name resume must not count as proof
+      // that Naukri accepted a replacement.
       return { confirmed: true, method: "Newly displayed uploaded filename", filename: fileInfo.name };
     }
     // When replacing the same filename, it is already present before upload.
