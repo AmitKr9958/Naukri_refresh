@@ -296,16 +296,13 @@ async function flushPendingTelegramNotifications() {
 }
 
 async function sendTelegramSuccess(cycle, confirmation) {
-  const alreadyUploadedToday = confirmation.alreadyUploadedToday === true;
   const message =
-    "🟢 Naukri Automation — RESUME STATUS VERIFIED\n\n" +
+    "🟢 Naukri Automation — DELETE + RE-UPLOAD VERIFIED\n\n" +
     "Run: #" + cycle + "\n" +
     "Resume: " + confirmation.filename + "\n" +
-    "Action: " + (alreadyUploadedToday
-      ? "Resume was already uploaded today; duplicate upload was skipped."
-      : "Resume uploaded successfully and verified.") + "\n" +
+    "Action: Previous resume deleted; configured resume uploaded again.\n" +
     "Verification: " + confirmation.method + "\n" +
-    "Next check: in " + INTERVAL_MINUTES + " minutes\n" +
+    "Next cycle: in " + INTERVAL_MINUTES + " minutes\n" +
     "Time: " + new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
   await sendTelegramMessage(message, "success");
 }
@@ -786,7 +783,7 @@ async function tryNormalProfileUpdate(page) {
   return { attempted: false, resumeUploaded: false };
 }
 
-async function deleteExistingResume(page, fileInfo) {
+async function deleteExistingResume(page, fileInfo, recheckedAfterReload = false) {
   // Naukri normally stores one active resume, but its filename may differ from
   // the local configured filename. Find a visible resume document by extension
   // and click only the Delete/Remove control adjacent to that exact entry.
@@ -843,8 +840,22 @@ async function deleteExistingResume(page, fileInfo) {
   }).catch(() => null);
 
   if (!existingEntry) {
-    log("No visible existing resume document was found on the Naukri profile; proceeding directly to upload " + fileInfo.name + ".");
-    return false;
+    if (!recheckedAfterReload) {
+      log("No visible resume entry was detected on the first profile render. Reloading once and checking again before allowing any upload.");
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(async error => {
+        log("Profile reload before resume deletion check did not reach DOMContentLoaded: " + error.message);
+      });
+      await page.locator('input#attachCV[type="file"][aria-label="Upload resume"]')
+        .waitFor({ state: "attached", timeout: 45000 });
+      await page.waitForTimeout(4000);
+      return await deleteExistingResume(page, fileInfo, true);
+    }
+
+    throw new Error(
+      "Could not identify a visible existing resume entry after reloading the Naukri profile. " +
+      "The delete-and-reupload requirement cannot be verified, so upload was blocked. " +
+      "No success notification will be sent."
+    );
   }
 
   if (existingEntry.deleteIndex < 0) {
@@ -913,7 +924,16 @@ async function deleteExistingResume(page, fileInfo) {
       log("No resume deletion confirmation popup appeared; verifying whether deletion completed immediately.");
     }
 
-    const deletionDisappeared = await page.waitForFunction(filename => {
+    // Always verify deletion against a freshly loaded server-backed profile.
+    // A disappearing DOM node alone is not sufficient evidence: Naukri may
+    // optimistically remove it before the server has persisted the change.
+    log("Reloading Naukri profile to verify that the previous resume was deleted on the server.");
+    await page.goto(PROFILE_URL, { waitUntil: "commit", timeout: 30000 });
+    await page.locator('input#attachCV[type="file"][aria-label="Upload resume"]')
+      .waitFor({ state: "attached", timeout: 45000 });
+    await page.waitForTimeout(4000);
+
+    const deletionVerified = await page.waitForFunction(() => {
       const visible = element => {
         const style = window.getComputedStyle(element);
         const rect = element.getBoundingClientRect();
@@ -923,23 +943,18 @@ async function deleteExistingResume(page, fileInfo) {
           rect.width > 0 &&
           rect.height > 0;
       };
-
-      return !Array.from(document.querySelectorAll("body *")).some(element =>
+      const filenamePattern = /^[^\\r\\n]{1,240}\\.(pdf|doc|docx|rtf|odt)$/i;
+      const remaining = Array.from(document.querySelectorAll("body *")).filter(element =>
         element.children.length === 0 &&
-        (element.textContent || "").trim() === filename &&
-        visible(element)
+        visible(element) &&
+        filenamePattern.test((element.textContent || "").trim())
       );
-    }, existingEntry.filename, { timeout: 12000 }).then(() => true).catch(() => false);
+      const body = (document.body && document.body.innerText || "").toLowerCase();
+      return body.includes("resume") && remaining.length === 0;
+    }, undefined, { timeout: 20000 }).then(() => true).catch(() => false);
 
-    if (!deletionDisappeared) {
-      log("Naukri did not remove the old resume entry from the current page within 12 seconds. Reopening the profile to check server state before deciding whether to retry deletion.");
-      await page.goto(PROFILE_URL, { waitUntil: "commit", timeout: 30000 }).catch(error => {
-        log("Profile navigation after deletion check did not complete: " + error.message);
-      });
-      await page.locator('input#attachCV[type="file"][aria-label="Upload resume"]')
-        .waitFor({ state: "attached", timeout: 45000 });
-
-      const oldEntryStillPresent = await page.evaluate(filename => {
+    if (!deletionVerified) {
+      const remainingNames = await page.locator("body *").evaluateAll(elements => {
         const visible = element => {
           const style = window.getComputedStyle(element);
           const rect = element.getBoundingClientRect();
@@ -949,20 +964,19 @@ async function deleteExistingResume(page, fileInfo) {
             rect.width > 0 &&
             rect.height > 0;
         };
-        return Array.from(document.querySelectorAll("body *")).some(element =>
+        const pattern = /^[^\\r\\n]{1,240}\\.(pdf|doc|docx|rtf|odt)$/i;
+        return elements.filter(element =>
           element.children.length === 0 &&
-          (element.textContent || "").trim() === filename &&
-          visible(element)
-        );
-      }, existingEntry.filename).catch(() => true);
-
-      if (oldEntryStillPresent) {
-        throw new Error(
-          "Resume deletion was not verified: the existing profile entry (" +
-          existingEntry.filename +
-          ") is still present after reloading Naukri. Upload was stopped to avoid a false-positive refresh."
-        );
-      }
+          visible(element) &&
+          pattern.test((element.textContent || "").trim())
+        ).map(element => (element.textContent || "").trim()).slice(0, 10);
+      }).catch(() => []);
+      throw new Error(
+        "Resume deletion was not verified after reloading Naukri. " +
+        "Visible resume entries still found: " +
+        (remainingNames.length ? remainingNames.join(", ") : "profile resume section did not reach a verifiable empty state") +
+        ". Upload was stopped to prevent a false-positive refresh."
+      );
     }
   } finally {
     page.removeListener("dialog", dialogHandler);
@@ -1192,11 +1206,12 @@ async function uploadResume(page, context) {
       // uploading the configured file. deleteExistingResume throws if an
       // existing entry remains after a server-side profile reload.
       const deletedExistingResume = await deleteExistingResume(page, fileInfo);
-      if (deletedExistingResume) {
-        log("Existing configured resume removed; uploading the configured replacement now.");
+      if (deletedExistingResume !== true) {
+        throw new Error("Delete-and-reupload cycle blocked: existing resume deletion was not positively verified.");
       }
+      log("Existing Naukri resume deletion verified after a fresh profile load; proceeding with the configured re-upload.");
 
-      const previousBodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
+      const previousBodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
       log("Starting Naukri resume upload after checking for the existing configured resume.");
       const uploadTarget = await clickNaukriResumeUploadControl(page);
       await setResumeFile(uploadTarget);
