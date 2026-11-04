@@ -1072,8 +1072,7 @@ async function uploadResume(page, context) {
         day: "numeric",
         year: "numeric"
       }).format(new Date());
-      const escapedToday = today.replace(/[.*+?^\${}()|[\]\\]/g, "\\$&");
-      const uploadedToday = new RegExp("Uploaded\\s+on\\s+" + escapedToday, "i").test(nearbyText);
+      const uploadedToday = new RegExp("Uploaded\\s+on\\s+" + today, "i").test(nearbyText);
 
       if (uploadedToday) {
         const confirmation = {
