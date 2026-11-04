@@ -1080,40 +1080,10 @@ async function uploadResume(page, context) {
   const fileInfo = getResumeFileInfo();
   let lastError = null;
 
-  // Idempotency guard: Naukri's replacement prompt can remain mounted inside
-  // a hidden lightbox after the same resume has already been uploaded today.
-  // Do not repeatedly submit the identical file or report a false failure.
-  // The profile is checked again on every cycle; a new calendar day permits
-  // the normal upload flow to run again.
-  if (page && !page.isClosed()) {
-    const existingProfileText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
-    const filenameIndex = existingProfileText.indexOf(fileInfo.name);
-    if (filenameIndex >= 0) {
-      const nearbyText = existingProfileText.slice(
-        Math.max(0, filenameIndex - 100),
-        Math.min(existingProfileText.length, filenameIndex + fileInfo.name.length + 160)
-      );
-      const today = new Intl.DateTimeFormat("en-US", {
-        timeZone: "Asia/Kolkata",
-        month: "short",
-        day: "numeric",
-        year: "numeric"
-      }).format(new Date());
-      const uploadedToday = new RegExp("Uploaded\\s+on\\s+" + today, "i").test(nearbyText);
-
-      if (uploadedToday) {
-        const confirmation = {
-          confirmed: true,
-          filename: fileInfo.name,
-          method: "Configured resume is already listed on the Naukri profile with today's upload date; duplicate replacement skipped",
-          alreadyUploadedToday: true
-        };
-        log("Resume already current on Naukri for today; skipping duplicate replacement attempt.");
-        return confirmation;
-      }
-    }
-  }
-
+  // Run the configured resume upload on every five-minute cycle. Naukri's
+  // own "Yes, upload new" workflow replaces the previous resume safely; do
+  // not delete the old file first, because a failed upload would leave the
+  // profile without a resume.
   for (let attempt = 1; attempt <= UPLOAD_RETRIES; attempt++) {
     try {
       if (!page || page.isClosed()) {
@@ -1392,18 +1362,26 @@ async function recoverBrowserContext(currentContext) {
         const uploadConfirmation = await uploadResume(page, context);
 
         failures = 0;
+
+        // End this browser session after the verified upload. The persistent
+        // profile keeps the Naukri login, but Chromium itself must be closed
+        // during the five-minute waiting period.
+        if (context && !contextIsClosed(context)) {
+          await context.close().catch(error =>
+            log("Could not close Chromium cleanly after upload: " + error.message)
+          );
+        }
+        context = null;
+
         writeHealth("SUCCESS", cycle, {
-          phase: "waiting",
+          phase: "resume_uploaded",
           last_success_at: new Date().toISOString(),
           next_cycle: cycle + 1,
-          next_cycle_after_minutes: INTERVAL_MINUTES
+          next_cycle_after_minutes: INTERVAL_MINUTES,
+          browser_closed: true
         });
+        log("Cycle " + cycle + ": resume upload verified; Chromium closed. Sending Telegram confirmation.");
         await sendTelegramSuccess(cycle, uploadConfirmation);
-
-        // Keep the persistent Chromium session alive. The next cycle verifies
-        // the profile again; uploadResume() skips duplicate uploads when the
-        // configured resume is already listed with today's upload date.
-        log("Cycle " + cycle + ": resume status verified; keeping Chromium open for the next five-minute check.");
       } catch (error) {
         const errorMessage = String(error && error.message || error);
         const contextClosedError =
@@ -1534,6 +1512,15 @@ async function recoverBrowserContext(currentContext) {
           process.exit(1);
         }
       }
+
+      // Also close Chromium after a failed/recovered cycle so it never remains
+      // open while the scheduler waits for the next five-minute attempt.
+      if (context && !contextIsClosed(context)) {
+        await context.close().catch(error =>
+          log("Could not close Chromium after cycle: " + error.message)
+        );
+      }
+      context = null;
 
       const waitAfterCompletionMs = INTERVAL_MINUTES * 60 * 1000;
       writeHealth("WAITING", cycle, {
