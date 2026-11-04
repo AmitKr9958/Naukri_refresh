@@ -642,23 +642,26 @@ async function waitForResumeUploadConfirmation(page, fileInfo, previousBodyText 
       .waitFor({ state: "attached", timeout: 45000 });
 
     const persisted = await page.waitForFunction(filename => {
-      const visible = element => {
-        const style = window.getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          Number(style.opacity || 1) > 0 &&
-          rect.width > 0 &&
-          rect.height > 0;
-      };
-      const filenameVisible = Array.from(document.querySelectorAll("body *")).some(element =>
-        element.children.length === 0 &&
-        (element.textContent || "").trim() === filename &&
-        visible(element)
-      );
-      const body = (document.body && document.body.innerText || "");
-      return filenameVisible && /uploaded on/i.test(body);
-    }, fileInfo.name, { timeout: 30000 }).then(() => true).catch(() => false);
+        const visible = element => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== "none" && style.visibility !== "hidden" &&
+            Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+        };
+        const filenameNodes = Array.from(document.querySelectorAll("body *")).filter(element =>
+          element.children.length === 0 &&
+          (element.textContent || "").trim() === filename && visible(element)
+        );
+        return filenameNodes.some(filenameNode => {
+          let section = filenameNode;
+          for (let depth = 0; depth < 10 && section; depth++, section = section.parentElement) {
+            const text = (section.innerText || "").replace(/\\s+/g, " ").trim();
+            if (/uploaded on\\s*[:：]?\\s*\\w{3,9}\\s+\\d{1,2},?\\s+\\d{4}/i.test(text) ||
+                /uploaded on\\s*[:：]?\\s*\\d{1,2}[-/ ]\\w{3,9}[-/ ]\\d{2,4}/i.test(text)) return true;
+          }
+          return false;
+        });
+      }, fileInfo.name, { timeout: 45000 }).then(() => true).catch(() => false);
 
     if (persisted) {
       return {
