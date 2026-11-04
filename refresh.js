@@ -783,7 +783,7 @@ async function tryNormalProfileUpdate(page) {
   return { attempted: false, resumeUploaded: false };
 }
 
-async function deleteExistingResume(page, fileInfo, recheckedAfterReload = false) {
+async function deleteExistingResume(page, fileInfo, recheckedAfterReload = false, deletionRetryCount = 0) {
   // Naukri normally stores one active resume, but its filename may differ from
   // the local configured filename. Find a visible resume document by extension
   // and click only the Delete/Remove control adjacent to that exact entry.
@@ -971,8 +971,20 @@ async function deleteExistingResume(page, fileInfo, recheckedAfterReload = false
           filenamePattern.test((element.textContent || "").trim())
         ).map(element => (element.textContent || "").trim()).slice(0, 10);
       }).catch(() => []);
+
+      if (deletionRetryCount < 2 && remainingNames.length > 0) {
+        log(
+          "The old resume is still present after the server reload. " +
+          "Retrying the real Delete action (" + (deletionRetryCount + 2) + "/3) for: " +
+          remainingNames.join(", ")
+        );
+        await page.waitForTimeout(1800);
+        return await deleteExistingResume(page, fileInfo, true, deletionRetryCount + 1);
+      }
+
       throw new Error(
-        "Resume deletion was not verified after reloading Naukri. " +
+        "Resume deletion was not verified after " + (deletionRetryCount + 1) +
+        " delete attempt(s) and a fresh Naukri profile reload. " +
         "Visible resume entries still found: " +
         (remainingNames.length ? remainingNames.join(", ") : "profile resume section did not reach a verifiable empty state") +
         ". Upload was stopped to prevent a false-positive refresh."
