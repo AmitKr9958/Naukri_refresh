@@ -350,6 +350,7 @@ function Hide-NaukriBrowserWindows {
 
         $targetPids = [System.Collections.Generic.HashSet[int]]::new()
         $hiddenPids = $script:HiddenNaukriWindowPids
+        $newlyHiddenPids = [System.Collections.Generic.HashSet[int]]::new()
         foreach ($processInfo in $profileProcesses) {
             [void]$targetPids.Add([int]$processInfo.ProcessId)
         }
@@ -358,18 +359,19 @@ function Hide-NaukriBrowserWindows {
             param([IntPtr]$hWnd, [IntPtr]$lParam)
             [uint32]$windowPid = 0
             [void][NaukriWindowHider]::GetWindowThreadProcessId($hWnd, [ref]$windowPid)
-            if ($targetPids.Contains([int]$windowPid)) {
-                [void]$hiddenPids.Add([int]$windowPid)
+            if ($targetPids.Contains([int]$windowPid) -and [NaukriWindowHider]::IsWindowVisible($hWnd)) {
                 # SW_HIDE = 0. Chromium remains running and Playwright can
                 # continue interacting with its page without showing a window.
                 [void][NaukriWindowHider]::ShowWindow($hWnd, 0)
+                [void]$hiddenPids.Add([int]$windowPid)
+                [void]$newlyHiddenPids.Add([int]$windowPid)
             }
             return $true
         }.GetNewClosure()
 
         [void][NaukriWindowHider]::EnumWindows($callback, [IntPtr]::Zero)
-        if ($hiddenPids.Count -gt 0) {
-            Write-LauncherLog ("Chromium window-hide pass completed. Matched browser PID(s): " + (($hiddenPids | ForEach-Object { [string]$_ }) -join ", "))
+        if ($newlyHiddenPids.Count -gt 0) {
+            Write-LauncherLog ("Chromium window(s) hidden successfully. PID(s): " + (($newlyHiddenPids | ForEach-Object { [string]$_ }) -join ", "))
         }
     } catch {
         Write-LauncherLog ("Could not hide Chromium window: " + $_.Exception.Message)
