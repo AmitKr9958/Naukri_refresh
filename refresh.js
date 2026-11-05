@@ -1371,29 +1371,19 @@ async function recoverBrowserContext(currentContext) {
 
         failures = 0;
 
-        // End this browser session after the verified upload. The persistent
-        // profile keeps the Naukri login, but Chromium itself must be closed
-        // during the five-minute waiting period.
-        if (context && !contextIsClosed(context)) {
-          try {
-            await context.close();
-          } catch (closeError) {
-            throw new Error(
-              "Resume was verified, but Chromium did not close cleanly: " +
-              closeError.message
-            );
-          }
-        }
-        context = null;
-
+        // Keep the persistent Chromium context alive between cycles.
+        // Re-launching the same persistent profile every five minutes caused
+        // intermittent launchPersistentContext/CDP timeouts after a clean
+        // context.close(). Reuse the authenticated context and page instead.
         writeHealth("SUCCESS", cycle, {
           phase: "resume_uploaded",
           last_success_at: new Date().toISOString(),
           next_cycle: cycle + 1,
           next_cycle_after_minutes: INTERVAL_MINUTES,
-          browser_closed: true
+          browser_closed: false,
+          browser_reused_between_cycles: true
         });
-        log("Cycle " + cycle + ": resume upload verified; Chromium closed. Sending Telegram confirmation.");
+        log("Cycle " + cycle + ": resume upload verified; keeping the authenticated Chromium context open and hidden for the next cycle. Sending Telegram confirmation.");
         await sendTelegramSuccess(cycle, uploadConfirmation);
       } catch (error) {
         const errorMessage = String(error && error.message || error);
@@ -1529,15 +1519,9 @@ async function recoverBrowserContext(currentContext) {
         }
       }
 
-      // Also close Chromium after a failed/recovered cycle so it never remains
-      // open while the scheduler waits for the next five-minute attempt.
-      if (context && !contextIsClosed(context)) {
-        await context.close().catch(error =>
-          log("Could not close Chromium after cycle: " + error.message)
-        );
-      }
-      context = null;
-
+      // Keep a healthy authenticated Chromium context alive during the wait.
+      // If Chromium crashed, contextIsClosed() on the next cycle triggers the
+      // guarded recovery path before any Naukri page interaction.
       const waitAfterCompletionMs = INTERVAL_MINUTES * 60 * 1000;
       writeHealth("WAITING", cycle, {
         phase: "waiting",
