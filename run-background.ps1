@@ -254,9 +254,9 @@ function Start-NaukriRefreshWithRecovery {
         Write-Host "Starting Naukri Refresh attempt $attempt/$MaxAttempts."
         if (-not (Reset-NaukriProfileLocks)) { Start-Sleep -Seconds 5; continue }
         try {
-            # Keep the Node console hidden. Hide-NaukriBrowserWindows explicitly
-            # restores and maximizes only Chromium's top-level window in the
-            # interactive desktop session.
+            # Keep the Node console hidden. Chromium is launched off-screen by
+            # refresh.js; Hide-NaukriBrowserWindows applies SW_HIDE to its
+            # top-level window without restoring or maximizing it.
             $nodeProcess = Start-Process -FilePath $node -ArgumentList @($refreshScript) -WorkingDirectory $repo -PassThru -WindowStyle Hidden
 
             # Do not consider Node "started" merely because the process exists.
