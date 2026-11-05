@@ -128,18 +128,16 @@ function Test-NaukriProfileProcess {
 }
 
 function Get-NaukriProfileProcesses {
-    # IMPORTANT: only return the actual browser-owner process.
-    # Chromium creates many helper processes (crashpad, GPU, renderer and
-    # utility). They inherit --user-data-dir, but they do NOT own the browser
-    # window. Restoring/maximizing their HWNDs was causing extra windows to
-    # appear. The Playwright-launched browser owner has --remote-debugging-pipe
-    # and does not have a --type= helper-process argument.
+    # Match the browser-owner process by the dedicated Playwright profile,
+    # without requiring --remote-debugging-pipe. Chromium/Playwright versions
+    # can change their launch switches; that strict requirement caused the
+    # hider to miss the real window. Exclude helper processes because they do
+    # not own the normal top-level browser window.
     $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     @(
         $all | Where-Object {
             $_.Name -match "^(chrome|msedge|chromium)(\.exe)?$" -and
             (Test-NaukriProfileProcess $_) -and
-            $_.CommandLine -match '(?i)(^|\s)--remote-debugging-pipe(\s|$)' -and
             $_.CommandLine -notmatch '(?i)(^|\s)--type='
         }
     )
@@ -269,7 +267,13 @@ function Start-NaukriRefreshWithRecovery {
             $startupHealthy = $false
             $maxHealthAttempts = 24
             for ($healthAttempt = 1; $healthAttempt -le $maxHealthAttempts; $healthAttempt++) {
-                Start-Sleep -Seconds 5
+                # Chromium can create its desktop window before refresh.js
+                # publishes health. Poll and hide during startup, not only
+                # after the health check succeeds.
+                for ($hideAttempt = 0; $hideAttempt -lt 10; $hideAttempt++) {
+                    Hide-NaukriBrowserWindows
+                    Start-Sleep -Milliseconds 500
+                }
                 try { $nodeProcess.Refresh() } catch {}
 
                 if ($nodeProcess.HasExited) {
@@ -364,6 +368,9 @@ function Hide-NaukriBrowserWindows {
         }.GetNewClosure()
 
         [void][NaukriWindowHider]::EnumWindows($callback, [IntPtr]::Zero)
+        if ($hiddenPids.Count -gt 0) {
+            Write-LauncherLog ("Chromium window-hide pass completed. Matched browser PID(s): " + (($hiddenPids | ForEach-Object { [string]$_ }) -join ", "))
+        }
     } catch {
         Write-LauncherLog ("Could not hide Chromium window: " + $_.Exception.Message)
     }
