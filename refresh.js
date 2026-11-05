@@ -1513,7 +1513,12 @@ async function recoverBrowserContext(currentContext) {
             "Automation stopped after " + failures + " consecutive failures"
           );
           writeHealth("STOPPED", cycle, { phase: "max_consecutive_failures", failures });
-          await context.close().catch(() => {});
+          // A failed browser launch can leave context null. Guard cleanup so the
+          // original Chromium error is preserved instead of being masked by a
+          // secondary "Cannot read properties of null (reading close)" error.
+          if (context && !contextIsClosed(context)) {
+            await context.close().catch(() => {});
+          }
           releaseInstanceLock(INSTANCE_LOCK_PATH, instanceLock);
           process.exit(1);
         }
