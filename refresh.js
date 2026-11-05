@@ -57,6 +57,9 @@ const NAVIGATION_RETRIES = 3;
 const UPLOAD_RETRIES = 3;
 const RETRY_DELAY_MS = 5000;
 let lastAlertAt = 0;
+let activeCycle = 0;
+let activePhase = "idle";
+let activePhaseDetails = {};
 
 const emailAlertsEnabled =
   Boolean(ALERT_EMAIL && SMTP_HOST && SMTP_USER && SMTP_PASS);
@@ -306,7 +309,7 @@ async function sendTelegramSuccess(cycle, confirmation) {
     "Resume: " + confirmation.filename + "\n" +
     action + "\n" +
     "Verification: " + confirmation.method + "\n" +
-    "Next cycle: in " + INTERVAL_MINUTES + " minutes\n" +
+    "Cadence: every " + INTERVAL_MINUTES + " minutes, measured start-to-start\n" +
     "Time: " + new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
   await sendTelegramMessage(message, initial ? "initial_upload_success" : "replacement_success");
 }
@@ -376,6 +379,27 @@ function writeHealth(status, cycle, details = {}) {
   }
 }
 
+function updateCycleHealth(phase, details = {}) {
+  activePhase = phase;
+  activePhaseDetails = details;
+  if (activeCycle > 0) {
+    writeHealth("RUNNING", activeCycle, { phase, ...details });
+  }
+}
+
+// Keep the health timestamp fresh during slow Naukri navigation, deletion,
+// upload, and server-side verification operations. Do not overwrite WAITING.
+const healthHeartbeat = setInterval(() => {
+  if (activeCycle > 0 && activePhase !== "waiting" && activePhase !== "idle") {
+    writeHealth("RUNNING", activeCycle, {
+      phase: activePhase,
+      ...activePhaseDetails,
+      heartbeat: true
+    });
+  }
+}, 30000);
+if (typeof healthHeartbeat.unref === "function") healthHeartbeat.unref();
+
 async function dismissPopups(page) {
   for (const text of ["Not Now", "Skip", "Close", "Maybe Later"]) {
     try {
@@ -391,6 +415,7 @@ async function openProfile(page) {
   let lastError;
 
   for (let attempt = 1; attempt <= NAVIGATION_RETRIES; attempt++) {
+    updateCycleHealth("opening_profile", { navigation_attempt: attempt });
     try {
       if (page.isClosed()) {
         throw new Error("Naukri profile page is closed.");
@@ -435,8 +460,33 @@ async function openProfile(page) {
         " failed: " + error.message
       );
 
-      // Reuse the page on retry. A failed DOMContentLoaded wait must not be
-      // treated as proof that the profile itself failed to load.
+      // A navigation timeout does not always mean the page failed. Naukri can
+      // commit the profile UI while Playwright's navigation promise is still
+      // pending. If the dedicated upload input is already attached and enabled,
+      // continue with the usable authenticated page instead of restarting Chromium.
+      updateCycleHealth("checking_profile_after_navigation_timeout", {
+        navigation_attempt: attempt,
+        last_error: String(error && error.message || error).slice(0, 300)
+      });
+      const resumeInput = page.locator('input#attachCV[type="file"][aria-label="Upload resume"]').first();
+      const profileReadyAfterTimeout = await resumeInput
+        .waitFor({ state: "attached", timeout: 8000 })
+        .then(async () => {
+          const enabled = await resumeInput.isEnabled().catch(() => false);
+          const currentUrl = page.url();
+          return enabled && !/login|signin|sign-in/i.test(currentUrl);
+        })
+        .catch(() => false);
+
+      if (profileReadyAfterTimeout) {
+        await page.waitForTimeout(1000);
+        await dismissPopups(page);
+        log("Profile navigation timed out, but the authenticated profile and resume input are ready; continuing without restarting Chromium.");
+        return;
+      }
+
+      // Reuse the page on retry. A failed navigation must not be treated as
+      // proof that the profile itself failed to load.
     }
   }
 
@@ -749,6 +799,10 @@ async function tryNormalProfileUpdate(page) {
 }
 
 async function deleteExistingResume(page, fileInfo, recheckedAfterReload = false, deletionRetryCount = 0) {
+  updateCycleHealth("checking_existing_resume", {
+    configured_resume: fileInfo.name,
+    deletion_attempt: deletionRetryCount + 1
+  });
   // Naukri normally stores one active resume, but its filename may differ from
   // the local configured filename. Find a visible resume document by extension
   // and click only the Delete/Remove control adjacent to that exact entry.
@@ -850,48 +904,74 @@ async function deleteExistingResume(page, fileInfo, recheckedAfterReload = false
   try {
     await deleteControl.click({ timeout: 8000 });
 
-    // Naukri's confirmation popup is not consistently exposed with
-    // role="dialog". Require the exact resume-deletion question, then click
-    // only a visible control whose complete label is "Delete".
-    const confirmationPrompt = page.getByText(
-      /are you sure you want to delete the resume/i
-    ).first();
-    const promptVisible = await confirmationPrompt.isVisible({ timeout: 5000 }).catch(() => false);
+    // Naukri's custom confirmation UI varies between releases. Wait for a
+    // genuinely visible Delete button inside a small confirmation container
+    // that explicitly refers to this resume. This avoids clicking unrelated
+    // Delete controls (for example, the profile-photo dialog).
+    const confirmationDeadline = Date.now() + 8000;
+    let confirmationClicked = false;
 
-    if (promptVisible) {
-      const confirmCandidates = page.locator('button, [role="button"], a');
-      let confirmed = false;
+    while (Date.now() < confirmationDeadline) {
+      const deleteButtonIndex = await page.locator('button, [role="button"], a').evaluateAll((elements, expectedFilename) => {
+        const visible = element => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            Number(style.opacity || 1) > 0 &&
+            rect.width > 0 &&
+            rect.height > 0;
+        };
 
-      for (let index = 0; index < await confirmCandidates.count(); index++) {
-        const candidate = confirmCandidates.nth(index);
-        if (!(await candidate.isVisible().catch(() => false))) continue;
+        for (let index = 0; index < elements.length; index++) {
+          const button = elements[index];
+          if (!visible(button)) continue;
+          const label = (button.innerText || button.textContent || "")
+            .replace(/\\s+/g, " ").trim();
+          if (!/^delete$/i.test(label)) continue;
 
-        const label = await candidate.evaluate(element =>
-          (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim()
-        ).catch(() => "");
-
-        if (/^delete$/i.test(label)) {
-          await candidate.click({ timeout: 5000 });
-          confirmed = true;
-          log("Confirmed Naukri's resume deletion using the visible modal Delete button.");
-          break;
+          let container = button.parentElement;
+          for (let depth = 0; depth < 8 && container; depth++, container = container.parentElement) {
+            if (!visible(container)) continue;
+            const text = (container.innerText || container.textContent || "")
+              .replace(/\\s+/g, " ").trim();
+            const lower = text.toLowerCase();
+            const identifiesResume =
+              lower.includes(String(expectedFilename || "").toLowerCase()) ||
+              (/resume/i.test(text) && /(delete|remove)/i.test(text));
+            if (identifiesResume && text.length <= 1200) return index;
+          }
         }
+        return -1;
+      }, existingEntry.filename).catch(() => -1);
+
+      if (deleteButtonIndex >= 0) {
+        const confirmationButton = page.locator('button, [role="button"], a').nth(deleteButtonIndex);
+        await confirmationButton.click({ timeout: 5000 });
+        confirmationClicked = true;
+        log("Confirmed Naukri resume deletion using the visible Delete button scoped to the resume confirmation.");
+        break;
       }
 
-      if (!confirmed) {
-        throw new Error(
-          "Naukri displayed the resume deletion confirmation prompt, but its visible Delete button could not be identified safely."
-        );
-      }
+      await page.waitForTimeout(400);
+    }
+
+    if (!confirmationClicked) {
+      // Some Naukri versions delete immediately or use a native browser
+      // confirmation (handled by the dialog listener above). Server reload
+      // below remains the authority on whether deletion actually succeeded.
+      log("No scoped custom resume-deletion confirmation appeared; checking the server-backed profile before deciding whether to retry.");
     } else {
-      // Some Naukri UI versions may delete immediately without a confirmation
-      // popup. The filename disappearance check below verifies that outcome.
-      log("No resume deletion confirmation popup appeared; verifying whether deletion completed immediately.");
+      await page.waitForTimeout(800);
     }
 
     // Always verify deletion against a freshly loaded server-backed profile.
     // A disappearing DOM node alone is not sufficient evidence: Naukri may
     // optimistically remove it before the server has persisted the change.
+    updateCycleHealth("verifying_resume_deletion", {
+      deleted_resume: existingEntry.filename,
+      deletion_attempt: deletionRetryCount + 1
+    });
     log("Reloading Naukri profile to verify that the previous resume was deleted on the server.");
     await page.goto(PROFILE_URL, { waitUntil: "commit", timeout: 30000 });
     await page.locator('input#attachCV[type="file"][aria-label="Upload resume"]')
@@ -1080,9 +1160,9 @@ async function uploadResume(page, context) {
   const fileInfo = getResumeFileInfo();
   let lastError = null;
 
-  // Run the configured resume upload on every five-minute cycle.
-  // Delete the currently visible resume entry first, regardless of its
-  // filename. If deletion cannot be verified, stop before selecting the file.
+  // Every cycle intentionally deletes the existing Naukri resume and uploads
+  // the configured file again. This is the requested five-minute profile refresh.
+  // Never skip the delete-and-upload operation merely because filenames match.
   for (let attempt = 1; attempt <= UPLOAD_RETRIES; attempt++) {
     try {
       if (!page || page.isClosed()) {
@@ -1103,11 +1183,19 @@ async function uploadResume(page, context) {
       // Delete the current resume entry (whatever its filename) before
       // uploading the configured file. deleteExistingResume throws if an
       // existing entry remains after a server-side profile reload.
+      updateCycleHealth("deleting_existing_resume", {
+        configured_resume: fileInfo.name,
+        upload_attempt: attempt
+      });
       const resumeState = await deleteExistingResume(page, fileInfo);
       if (resumeState !== "already_empty" && resumeState !== "deleted") throw new Error("Resume state is ambiguous; upload blocked.");
       const operation = resumeState === "already_empty" ? "initial_upload" : "replacement";
       log(operation === "initial_upload" ? "Empty profile verified; starting initial resume upload." : "Old resume deletion verified; starting replacement upload.");
 
+      updateCycleHealth("uploading_configured_resume", {
+        configured_resume: fileInfo.name,
+        upload_attempt: attempt
+      });
       const previousBodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
       log("Starting Naukri resume upload after checking for the existing configured resume.");
       const uploadTarget = await clickNaukriResumeUploadControl(page);
@@ -1123,6 +1211,10 @@ async function uploadResume(page, context) {
 
       // Reload the profile and verify the uploaded resume is persisted on the
       // server, not merely present in the current page's transient UI.
+      updateCycleHealth("verifying_uploaded_resume", {
+        configured_resume: fileInfo.name,
+        upload_attempt: attempt
+      });
       await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(async error => {
         log("Profile reload after upload did not reach DOMContentLoaded; waiting for resume entry instead: " + error.message);
       });
@@ -1345,8 +1437,10 @@ async function recoverBrowserContext(currentContext) {
     process.on("SIGTERM", stop);
 
     while (true) {
+      const cycleStartedAt = Date.now();
       cycle++;
-      writeHealth("RUNNING", cycle, { phase: "starting_cycle" });
+      activeCycle = cycle;
+      updateCycleHealth("starting_cycle", { cycle_started_at: new Date(cycleStartedAt).toISOString() });
       await flushPendingTelegramNotifications();
 
       try {
@@ -1361,12 +1455,14 @@ async function recoverBrowserContext(currentContext) {
 
         let page = await createFreshPage(context);
 
+        updateCycleHealth("opening_profile", { cycle_started_at: new Date(cycleStartedAt).toISOString() });
         log("Cycle " + cycle + ": opening profile");
         await openProfile(page);
 
-        // Only use the explicit Naukri resume-upload entry point.
+        // Every five-minute cycle performs the requested delete-and-re-upload.
         // A generic file input or file selection is not proof of a saved upload.
-        log("Cycle " + cycle + ": starting verified resume upload");
+        updateCycleHealth("starting_delete_and_upload", { cycle_started_at: new Date(cycleStartedAt).toISOString() });
+        log("Cycle " + cycle + ": starting verified delete-and-re-upload");
         const uploadConfirmation = await uploadResume(page, context);
 
         failures = 0;
@@ -1524,18 +1620,34 @@ async function recoverBrowserContext(currentContext) {
         }
       }
 
-      // Keep a healthy authenticated Chromium context alive during the wait.
-      // If Chromium crashed, contextIsClosed() on the next cycle triggers the
-      // guarded recovery path before any Naukri page interaction.
-      const waitAfterCompletionMs = INTERVAL_MINUTES * 60 * 1000;
+      // Schedule cycles every five minutes start-to-start, not five minutes
+      // after completion. If a Naukri operation takes longer than five minutes,
+      // never overlap browser work: begin the next cycle immediately after the
+      // current cycle finishes and record the overrun.
+      const cadenceMs = INTERVAL_MINUTES * 60 * 1000;
+      const nextCycleAt = cycleStartedAt + cadenceMs;
+      const waitAfterCompletionMs = Math.max(0, nextCycleAt - Date.now());
+      const cycleDurationMs = Date.now() - cycleStartedAt;
+      activePhase = "waiting";
+      activePhaseDetails = {};
       writeHealth("WAITING", cycle, {
         phase: "waiting",
         next_cycle: cycle + 1,
-        next_cycle_after_minutes: INTERVAL_MINUTES
+        next_cycle_at: new Date(Math.max(Date.now(), nextCycleAt)).toISOString(),
+        next_cycle_after_seconds: Math.ceil(waitAfterCompletionMs / 1000),
+        cadence_minutes: INTERVAL_MINUTES,
+        cadence_type: "start_to_start",
+        cycle_duration_seconds: Math.round(cycleDurationMs / 1000),
+        cadence_overrun: waitAfterCompletionMs === 0
       });
-      log("Cycle " + cycle + ": completed. Next profile/resume verification starts in " +
-        INTERVAL_MINUTES + " minutes.");
-      await new Promise(resolve => setTimeout(resolve, waitAfterCompletionMs));
+      log("Cycle " + cycle + ": completed in " + Math.round(cycleDurationMs / 1000) +
+        " seconds. Next cycle starts " +
+        (waitAfterCompletionMs > 0
+          ? "in " + Math.ceil(waitAfterCompletionMs / 1000) + " seconds to maintain the five-minute start-to-start cadence."
+          : "immediately because the previous cycle exceeded the five-minute cadence."));
+      if (waitAfterCompletionMs > 0) {
+        await new Promise(resolve => setTimeout(resolve, waitAfterCompletionMs));
+      }
     }
   } catch (error) {
     if (error && error.code === "EINSTANCELOCK") {
