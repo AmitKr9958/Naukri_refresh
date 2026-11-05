@@ -231,21 +231,80 @@ function Clear-StaleNaukriProfileLock {
 }
 
 function Reset-NaukriProfileLocks {
-    for ($pass = 1; $pass -le 8; $pass++) {
-        Write-Host "Naukri profile cleanup pass $pass/8"
-        Stop-NaukriAutomationBrowsers
-        Start-Sleep -Milliseconds 750
-        $remaining = @(Get-NaukriAutomationProcesses)
-        if ($remaining) { Start-Sleep -Seconds 1; continue }
-        if (Clear-StaleNaukriProfileLock) {
-            Start-Sleep -Milliseconds 500
-            $lockFilesRemain = @("SingletonLock", "SingletonCookie", "SingletonSocket") | Where-Object { Test-Path -LiteralPath (Join-Path $profileMarker $_) }
-            if (-not $lockFilesRemain) { Write-Host "Naukri Chromium profile is clean and unlocked."; return $true }
-        }
-        Start-Sleep -Seconds 1
+    # Bounded cleanup: one process snapshot, exact command-line matching, and
+    # a short verification window. Avoid recursive CIM tree walks here; they
+    # previously left the launcher stalled before Node was started.
+    Write-LauncherLog "Cleanup: taking one process snapshot."
+    try {
+        $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    } catch {
+        Write-LauncherLog ("Cleanup: process snapshot failed: " + $_.Exception.Message)
+        return $false
     }
-    Write-Host "Naukri profile cleanup did not complete after 8 passes."
-    return $false
+
+    $targets = @($all | Where-Object {
+        (
+            $_.Name -eq "node.exe" -and $_.CommandLine -and
+            $_.CommandLine.IndexOf($refreshScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        ) -or (
+            $_.Name -match "^(chrome|msedge|chromium)(\.exe)?$" -and
+            (Test-NaukriProfileProcess $_)
+        )
+    })
+
+    Write-LauncherLog ("Cleanup: found " + $targets.Count + " managed process(es).")
+    foreach ($target in $targets) {
+        try {
+            Write-LauncherLog ("Cleanup: stopping PID " + $target.ProcessId + " (" + $target.Name + ").")
+            & taskkill.exe /PID ([string]$target.ProcessId) /T /F 2>$null | Out-Null
+        } catch {
+            Write-LauncherLog ("Cleanup: taskkill failed for PID " + $target.ProcessId + ": " + $_.Exception.Message)
+        }
+    }
+
+    # Verify only for a bounded period. Each check uses one process snapshot.
+    for ($check = 1; $check -le 5; $check++) {
+        Start-Sleep -Milliseconds 500
+        try {
+            $current = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+            $remaining = @($current | Where-Object {
+                (
+                    $_.Name -eq "node.exe" -and $_.CommandLine -and
+                    $_.CommandLine.IndexOf($refreshScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                ) -or (
+                    $_.Name -match "^(chrome|msedge|chromium)(\.exe)?$" -and
+                    (Test-NaukriProfileProcess $_)
+                )
+            })
+        } catch {
+            Write-LauncherLog ("Cleanup: verification snapshot failed: " + $_.Exception.Message)
+            return $false
+        }
+
+        if ($remaining.Count -eq 0) { break }
+        Write-LauncherLog ("Cleanup: " + $remaining.Count + " managed process(es) remain after check " + $check + "/5.")
+    }
+
+    if ($remaining.Count -gt 0) {
+        Write-LauncherLog "Cleanup: managed processes remain; refusing to touch profile lock files."
+        return $false
+    }
+
+    foreach ($lockName in @("SingletonLock", "SingletonCookie", "SingletonSocket")) {
+        $lockPath = Join-Path $profileMarker $lockName
+        if (Test-Path -LiteralPath $lockPath) {
+            try {
+                Remove-Item -LiteralPath $lockPath -Force -ErrorAction Stop
+                Write-LauncherLog ("Cleanup: removed stale lock " + $lockName + ".")
+            } catch {
+                Write-LauncherLog ("Cleanup: could not remove " + $lockName + ": " + $_.Exception.Message)
+                return $false
+            }
+        }
+    }
+
+    Write-LauncherLog "Cleanup: completed successfully."
+    return $true
 }
 
 function Start-NaukriRefreshWithRecovery {
