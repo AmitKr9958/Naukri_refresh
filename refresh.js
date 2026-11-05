@@ -1197,7 +1197,8 @@ async function launchBrowserContext() {
   // - Safer Chromium args that avoid first-run, default-browser, and recent
   //   DevTools-debugging restrictions that can leave the process alive while
   //   launchPersistentContext never returns.
-  // - Chromium opens as a normal visible desktop window for interactive troubleshooting.
+  // - Chromium starts outside the visible desktop so headed mode does not flash a window.
+  // - The Windows launcher then hides its top-level HWND while Playwright controls it.
   // - Clear distinction between true profile locks and generic launch timeouts.
   const launchTimeoutMs = readPositiveNumberEnv("BROWSER_LAUNCH_TIMEOUT_MS", 90000, 5000, true);
   let executablePath = null;
@@ -1212,8 +1213,11 @@ async function launchBrowserContext() {
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-features=DevToolsDebuggingRestrictions",
-    "--start-maximized",
-    "--window-position=0,0"
+    // Keep the browser headed for Naukri compatibility, but create its window
+    // outside the visible desktop from the first frame. The launcher also
+    // applies SW_HIDE as a second layer; no maximize/restore command is used.
+    "--window-size=1365,900",
+    "--window-position=-32000,-32000"
   ];
 
   log(
@@ -1235,11 +1239,11 @@ async function launchBrowserContext() {
     const options = {
       headless: HEADLESS,
       timeout: launchTimeoutMs,
-      // Use the actual maximized desktop window dimensions instead of a fixed viewport.
+      // Use the browser window's configured dimensions while keeping it off-screen.
       viewport: null,
-      // Naukri currently requires headed Chromium. Keep the real browser engine
-      // active and visible on the desktop for interactive troubleshooting.
-      // File uploads are handled by Playwright filechooser API.
+      // Keep the real headed Chromium engine for Naukri compatibility. Its
+      // native window is created off-screen and hidden by run-background.ps1.
+      // File uploads are handled by Playwright's file input API.
       args: launchArgs
     };
     if (executablePath) {
@@ -1322,8 +1326,8 @@ async function recoverBrowserContext(currentContext) {
     writeHealth("STARTING", 0, { phase: "launching_browser" });
     log("Startup: launching persistent Chromium with the saved Naukri profile.");
     context = await launchBrowserContext();
-    log("Startup: persistent Chromium launched successfully; headed desktop window will be maximized.");
-    writeHealth("RUNNING", 0, { phase: "browser_ready", browser_visible: true, browser_maximized: true, next_cycle: 1 });
+    log("Startup: persistent Chromium launched successfully in headed off-screen background mode.");
+    writeHealth("RUNNING", 0, { phase: "browser_ready", browser_visible: false, browser_offscreen: true, next_cycle: 1 });
 
     let cycle = 0;
     let failures = 0;
