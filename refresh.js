@@ -927,14 +927,14 @@ async function deleteExistingResume(page, fileInfo, recheckedAfterReload = false
           const button = elements[index];
           if (!visible(button)) continue;
           const label = (button.innerText || button.textContent || "")
-            .replace(/\\s+/g, " ").trim();
+            .replace(/\s+/g, " ").trim();
           if (!/^delete$/i.test(label)) continue;
 
           let container = button.parentElement;
           for (let depth = 0; depth < 8 && container; depth++, container = container.parentElement) {
             if (!visible(container)) continue;
             const text = (container.innerText || container.textContent || "")
-              .replace(/\\s+/g, " ").trim();
+              .replace(/\s+/g, " ").trim();
             const lower = text.toLowerCase();
             const identifiesResume =
               lower.includes(String(expectedFilename || "").toLowerCase()) ||
